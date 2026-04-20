@@ -1,59 +1,99 @@
-# Rafiki - AI Personal Finance Assistant
+# Rafiki — AI Personal Finance Companion (Phase 1)
 
 ## Overview
-Rafiki is a mobile-first personal finance web application that helps users budget and save smarter by analysing their M-Pesa and bank statements.
+Rafiki is a mobile-first personal finance web application for Kenya that analyses M-Pesa and bank statements, builds a financial model, and guides users through a priority stack of their obligations — all powered by real transaction analysis and Gemini AI.
 
 ## Tech Stack
-- **Frontend**: React 18 + Vite + TypeScript + Tailwind CSS + shadcn/ui (Radix UI)
+- **Frontend**: React 18 + Vite + TypeScript + Tailwind CSS + shadcn/ui
 - **Backend**: Express.js 5 + TypeScript
 - **Database**: PostgreSQL via Drizzle ORM
-- **Auth**: Passport.js (passport-local + express-session)
+- **AI**: Google Gemini 1.5 Flash (for reveal messages and gap-filling questions)
+- **File handling**: multer (file uploads), csv-parse (CSV parsing)
 - **Routing**: Wouter (client-side)
-- **Data fetching**: TanStack Query (React Query)
-- **Forms**: React Hook Form + Zod
+- **Data fetching**: TanStack Query
+
+## Architecture — Two Core Systems
+
+### The Accountant (server/accountant.ts)
+Pure deterministic Python-equivalent TypeScript functions. No LLM calls.
+- `categorizeTransactions()` — matches counterparties against paybill lookup
+- `identifyRecurring()` — finds same counterparty with similar amounts >1x
+- `identifySalary()` — identifies largest recurring credit as salary
+- `computeFinancialSummary()` — builds full financial model
+- `generatePriorityStack()` — creates tiered obligation list
+
+### RAFIKI AI Layer (server/gemini.ts)
+Uses Gemini only for natural language generation. Never does math.
+- `generateRevealMessage()` — creates the "it already knows me" moment
+- `generateGapFillingQuestion()` — generates contextual questions about unknowns
 
 ## Project Structure
 ```
-client/
-  src/
-    pages/          # Route-level page components
-    components/ui/  # Reusable shadcn/ui components
-    hooks/          # Custom React hooks
-    lib/            # Utilities and QueryClient setup
-  public/
-    figmaAssets/    # Static SVG/image assets from Figma
+client/src/
+  pages/
+    StatementUpload.tsx   # Stage 1: Upload M-Pesa/bank statements
+    SilentAnalysis.tsx    # Stage 2: Polling analysis progress with animation
+    PriorityStackReview.tsx  # Stage 3+4: AI reveal + priority stack review
+    GapFilling.tsx        # Stage 4: Resolve unknown transactions one-by-one
+    PriorityStack.tsx     # Stage 5: Edit/reorder the priority stack
+    Home.tsx              # Home screen: balance, health score, stack summary
+  lib/
+    rafiki-context.tsx    # Session state: userId, jobId, onboardingStage
+    queryClient.ts        # TanStack Query + apiRequest helper
+
 server/
-  index.ts          # Express server entry point
-  routes.ts         # API route definitions
-  storage.ts        # DB abstraction (MemStorage / DB)
-shared/
-  schema.ts         # Drizzle ORM schema + Zod types
+  index.ts               # Express server entry
+  routes.ts              # All API endpoints
+  db.ts                  # Drizzle ORM database connection
+  storage.ts             # DbStorage + MemStorage implementations
+  parser.ts              # M-Pesa CSV parser + demo transaction generator
+  paybill-lookup.ts      # Hardcoded Kenyan paybill/merchant lookup table
+  accountant.ts          # Deterministic financial engine (The Accountant)
+  gemini.ts              # Gemini AI layer (RAFIKI)
+  analysis-pipeline.ts   # Async pipeline orchestrating all stages
+
+shared/schema.ts          # Drizzle schema: users, transactions, entities,
+                          # priority_stack_items, analysis_jobs
 ```
 
-## Pages & Routing
-| Route | Component | Description |
-|-------|-----------|-------------|
-| `/` | StatementUpload | Upload M-Pesa/bank statements |
-| `/analyzing` | SilentAnalysis | Animated loading screen while Rafiki reads statements (auto-redirects to /reveal after 3s) |
-| `/reveal` | GapFilling | AI reveals key financial insights |
-| `/priority-stack-review` | PriorityStackReview | AI summary + ordered priority list for review |
-| `/priority-stack` | PriorityStack | Editable ranked list of financial obligations |
+## Onboarding Flow (5 Stages)
+| Route | Stage | Description |
+|-------|-------|-------------|
+| `/` | Upload | User uploads M-Pesa CSV/PDF or uses demo data |
+| `/analyzing` | Analysis | Polls job status with live progress bar |
+| `/reveal` | Reveal | AI reveal message + priority stack for review |
+| `/gap-filling` | Gap-filling | RAFIKI asks about unknown transactions one-by-one |
+| `/priority-stack` | Edit stack | User can drag to reorder + add obligations |
+| `/home` | Home | Balance, health score, top categories, stack summary |
 
-## User Flow
-1. **StatementUpload** → user uploads M-Pesa/bank PDF → clicks Continue
-2. **SilentAnalysis** → animated loading screen → auto-advances to Reveal after 3 seconds
-3. **GapFilling/Reveal** → AI shows income, top expense, and savings gap
-4. **PriorityStackReview** → AI explains spending + ranked priority list
-5. **PriorityStack** → user can reorder/adjust their obligations → Save
+## API Endpoints
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/user/init` | Create or get user session |
+| POST | `/api/onboarding/upload` | Upload file, start async analysis job |
+| GET | `/api/onboarding/job/:id` | Poll job status and results |
+| GET | `/api/onboarding/state/:userId` | Get current onboarding state |
+| POST | `/api/onboarding/gap-fill` | Submit answer for unknown entity |
+| POST | `/api/onboarding/save-stack` | Save final priority stack |
+| GET | `/api/home/:userId` | Get home screen data |
 
-## Design
-- Colour palette: `#00342b` (teal dark), `#afefdd` (mint), `#f9f9f9` (bg), `#1a1c1c` (text), `#3f4945` (muted)
-- Font: Inter (via Helvetica fallback)
-- Mobile-first layout, max-width ~448–672px centred
+## Environment Variables Required
+- `GEMINI_API_KEY` — Google AI Studio API key
+- `DATABASE_URL` — PostgreSQL connection string (auto-provisioned by Replit)
+- `SESSION_SECRET` — Express session secret (auto-provisioned by Replit)
 
-## Running the App
+## Design Tokens
+- Primary: `#00342b` (Deep Teal)
+- Secondary: `#4755b6` (Warm Indigo)
+- Accent: `#afefdd` (Mint)
+- Background: `#f9f9f9` (Off-white)
+- Text: `#1a1c1c` (Near-black), `#3f4945` (Muted)
+- Card radius: 24px outer, 9999px for pills
+- Font: Inter (sans-serif), max weight 500 (medium)
+
+## Running
 ```bash
-npm run dev        # Start dev server (port 5000)
+npm run dev        # Start dev server on port 5000
 npm run build      # Production build
-npm run db:push    # Push schema to database
+npm run db:push    # Sync schema to database
 ```
