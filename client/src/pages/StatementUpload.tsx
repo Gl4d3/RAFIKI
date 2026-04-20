@@ -1,3 +1,4 @@
+import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 
@@ -20,6 +21,8 @@ const statementCards = [
 ];
 
 export const StatementUpload = (): JSX.Element => {
+  const [, setLocation] = useLocation();
+
   return (
     <div className="flex flex-col min-h-[1089px] items-center bg-[#f9f9f9]">
       {/* Navigation Bar */}
@@ -94,11 +97,17 @@ export const StatementUpload = (): JSX.Element => {
         {/* Action Buttons */}
         <div className="flex flex-col items-center gap-8 pt-4 self-stretch w-full flex-[0_0_auto]">
           {/* Continue Button */}
-          <Button className="h-14 w-full rounded-full shadow-[0px_1px_2px_#0000000d] bg-[linear-gradient(179deg,rgba(0,52,43,1)_0%,rgba(0,77,64,1)_100%)] [font-family:'Inter',Helvetica] font-medium text-white text-base tracking-[0] leading-6 hover:opacity-90 border-0">
+          <Button
+            onClick={() => setLocation("/analyzing")}
+            className="h-14 w-full rounded-full shadow-[0px_1px_2px_#0000000d] bg-[linear-gradient(179deg,rgba(0,52,43,1)_0%,rgba(0,77,64,1)_100%)] [font-family:'Inter',Helvetica] font-medium text-white text-base tracking-[0] leading-6 hover:opacity-90 border-0"
+          >
             Continue
           </Button>
           {/* Skip for now */}
-          <button className="[font-family:'Inter',Helvetica] font-normal text-[#3f4945] text-sm tracking-[0.35px] leading-5 whitespace-nowrap bg-transparent border-0 cursor-pointer">
+          <button
+            onClick={() => setLocation("/reveal")}
+            className="[font-family:'Inter',Helvetica] font-normal text-[#3f4945] text-sm tracking-[0.35px] leading-5 whitespace-nowrap bg-transparent border-0 cursor-pointer"
+          >
             Skip for now
           </button>
         </div>

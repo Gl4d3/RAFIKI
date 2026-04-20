@@ -6,13 +6,19 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 
 import { StatementUpload } from "@/pages/StatementUpload";
+import { SilentAnalysis } from "@/pages/SilentAnalysis";
+import { GapFilling } from "@/pages/GapFilling";
+import { PriorityStackReview } from "@/pages/PriorityStackReview";
+import { PriorityStack } from "@/pages/PriorityStack";
 
 function Router() {
   return (
     <Switch>
-      {/* Add pages below */}
       <Route path="/" component={StatementUpload} />
-      {/* Fallback to 404 */}
+      <Route path="/analyzing" component={SilentAnalysis} />
+      <Route path="/reveal" component={GapFilling} />
+      <Route path="/priority-stack-review" component={PriorityStackReview} />
+      <Route path="/priority-stack" component={PriorityStack} />
       <Route component={NotFound} />
     </Switch>
   );
