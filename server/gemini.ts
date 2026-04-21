@@ -7,13 +7,50 @@ import type { FinancialSummary, EntitySummary } from "./accountant";
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
-const model = genAI.getGenerativeModel({
+const generationConfig = {
+  temperature: 0.7,
+  maxOutputTokens: 1024,
+};
+
+// Primary model — fast, cheap. Falls back to the heavier Pro model if it's
+// rate-limited or returns 503 / quota errors.
+const primaryModel = genAI.getGenerativeModel({
   model: "gemini-3.1-flash-lite-preview",
-  generationConfig: {
-    temperature: 0.7,
-    maxOutputTokens: 1024,
-  },
+  generationConfig,
 });
+
+const fallbackModel = genAI.getGenerativeModel({
+  model: "gemini-2.5-pro",
+  generationConfig,
+});
+
+// Errors worth retrying on the fallback model
+function isOverloadedError(err: any): boolean {
+  const status = err?.status ?? err?.response?.status;
+  if (status === 503 || status === 429 || status === 500) return true;
+  const msg = String(err?.message || "").toLowerCase();
+  return (
+    msg.includes("overloaded") ||
+    msg.includes("high demand") ||
+    msg.includes("rate") ||
+    msg.includes("quota") ||
+    msg.includes("unavailable")
+  );
+}
+
+async function generateWithFallback(prompt: string): Promise<string> {
+  try {
+    const result = await primaryModel.generateContent(prompt);
+    return result.response.text().trim();
+  } catch (err: any) {
+    if (!isOverloadedError(err)) throw err;
+    console.warn(
+      `Primary Gemini model busy (${err?.status || "?"}). Retrying on gemini-2.5-pro...`
+    );
+    const result = await fallbackModel.generateContent(prompt);
+    return result.response.text().trim();
+  }
+}
 
 // RAFIKI system personality
 const RAFIKI_PERSONA = `You are RAFIKI, a warm, calm, and intelligent personal finance companion built for Kenya. 
@@ -64,11 +101,10 @@ Rules:
 - Do NOT list everything — pick the 1-2 most interesting findings and focus on those`;
 
   try {
-    const result = await model.generateContent(prompt);
-    return result.response.text().trim();
+    return await generateWithFallback(prompt);
   } catch (error) {
-    console.error("Gemini error:", error);
-    // Fallback to template if AI fails
+    console.error("Gemini error (both models failed):", error);
+    // Final fallback to template if both AI models fail
     const cat = topCategory
       ? `KSh ${topCategory.total.toLocaleString()} on ${topCategory.label}`
       : "significant amounts";
@@ -101,10 +137,9 @@ The question should:
 Example style: "I keep seeing KSh 2,000 going to Peter every month — is that a regular debt repayment or family support?"`;
 
   try {
-    const result = await model.generateContent(prompt);
-    return result.response.text().trim();
+    return await generateWithFallback(prompt);
   } catch (error) {
-    console.error("Gemini error:", error);
+    console.error("Gemini error (both models failed):", error);
     return `I noticed ${entity.occurrences} payments to "${entity.name}" totalling KSh ${entity.totalAmount.toLocaleString()}. What is this for?`;
   }
 }

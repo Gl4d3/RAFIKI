@@ -1,0 +1,106 @@
+We have a vision problem with the Priority Stack feature. Here is what we 
+intended versus what we are currently seeing, and we need the implementation 
+corrected to match the intent.
+
+---
+
+OUR INTENT
+
+The Priority Stack is a ranked list of SPENDING CATEGORIES, not individual 
+merchants or transactions. The user's financial life should be represented as 
+grouped obligations like "Housing & Rent", "Transport", "Food & Groceries", 
+"Utilities", "Savings Goals", "Social Obligations" — each with a combined 
+monthly total derived from all the individual transactions that belong to 
+that category.
+
+The categories must align with the four-tier Priority Cascade defined in our 
+product:
+
+  Tier 1 — Survival: Non-negotiable obligations. Things like rent, groceries, 
+  transport to work, utilities. The user cannot function without these.
+
+  Tier 2 — Social Obligations: Recurring transfers to family, chama 
+  contributions, informal support. Core to Kenyan financial life.
+
+  Tier 3 — Growth: Savings goals, emergency buffer contributions, investments.
+
+  Tier 4 — Lifestyle: Discretionary spend — dining out, entertainment, 
+  subscriptions that are not essential.
+
+The priority stack should show one card per category. Each card shows:
+  - The category name (e.g. "Transport")
+  - The combined monthly total across all transactions in that category 
+    (e.g. "KSh 3,160/month" combining Uber KSh 2,390 + Bolt KSh 770)
+  - Its tier designation
+  - A drag handle for reordering
+
+---
+
+WHAT WE ARE CURRENTLY SEEING
+
+The Priority Stack screen is showing individual merchants as priority items:
+  Rent, Naivas, Zuku, Uber, KPLC Prepaid, NHIF, Bolt — each as a separate 
+  ranked card.
+
+This is the raw parser output being used directly as priority stack items. 
+There is no aggregation step happening between parsing and display.
+
+Specific examples of what should be grouped:
+  - Uber (KSh 2,390) + Bolt (KSh 770) → "Transport" category, KSh 3,160/month
+  - Naivas → "Food & Groceries" category (add any other grocery merchants here)
+  - Zuku + KPLC Prepaid → "Utilities" category, KSh 9,100/month
+  - Rent stays as its own item under Housing, it is already a category
+
+---
+
+THE FIX WE NEED
+
+There needs to be an aggregation and classification step between the parser 
+and the priority stack. This step should:
+
+1. Map each identified counterparty to a spending category. The Accountant 
+   already has a lookup table of known Kenyan merchants — extend this to 
+   include the category each merchant belongs to. For example:
+   - Uber, Bolt, matatu till numbers → Transport
+   - Naivas, Carrefour, Quickmart → Food & Groceries
+   - KPLC, Zuku, Nairobi Water, Safaricom postpaid → Utilities
+   - NHIF, SHA → Health
+   - Any recurring transfer to an individual number → Social Obligations 
+     (unless the user has identified it as a debt repayment or chama)
+
+2. Sum all transactions in each category to produce a monthly total per 
+   category.
+
+3. Apply a default tier assignment based on the category:
+   - Housing, Food & Groceries, Transport (work-related), Utilities → Tier 1
+   - Social Obligations, Chama → Tier 2
+   - Savings, Emergency Fund → Tier 3
+   - Entertainment, Dining Out, Other Subscriptions → Tier 4
+
+4. Present one card per category in the Priority Stack, not one card per 
+   merchant.
+
+5. The user should be able to reorder these category cards to reflect their 
+   personal priorities within and across tiers.
+
+---
+
+WHAT SHOULD NOT CHANGE
+
+The underlying transaction-level data must still be stored. Individual 
+merchant records (Naivas, Uber, KPLC etc.) remain in the database as the 
+raw evidence that builds the category totals. The priority stack is a view 
+on top of that data, not a replacement for it.
+
+The gap-filling conversation stage is correct in concept — it is right to 
+ask about unknown counterparties one at a time. But the answers from that 
+conversation should feed into the category grouping, not create new 
+individual priority stack items.
+
+---
+
+Please audit the full pipeline from statement parsing → entity resolution → 
+category aggregation → priority stack generation and correct it so the output 
+matches the intent described above. Show us the corrected Priority Stack with 
+the sample data already in the system grouped into proper categories before 
+making any other changes.

@@ -333,50 +333,78 @@ export function computeFinancialSummary(
   };
 }
 
-// Generate suggested priority stack (deterministic)
+// Default tier per category (Priority Cascade)
+// Tier 1 — Survival; Tier 2 — Social Obligations; Tier 3 — Growth; Tier 4 — Lifestyle
+const CATEGORY_TIER: Record<string, string> = {
+  rent: "1",
+  food: "1",
+  transport: "1",
+  utilities: "1",
+  healthcare: "1",
+  family: "2",
+  chama: "2",
+  education: "2",
+  savings: "3",
+  entertainment: "4",
+};
+
+// Friendly labels per category for the Priority Stack
+const CATEGORY_DISPLAY: Record<string, string> = {
+  rent: "Housing & Rent",
+  food: "Food & Groceries",
+  transport: "Transport",
+  utilities: "Utilities",
+  healthcare: "Health",
+  family: "Social Obligations",
+  chama: "Chama",
+  education: "Education",
+  savings: "Savings",
+  entertainment: "Lifestyle & Entertainment",
+};
+
+// Generate the Priority Stack — one card per CATEGORY (not per merchant).
+// Aggregates every debit transaction into its category, sums to a monthly total,
+// and applies the default Priority Cascade tier. Unknown / uncategorised debits
+// are intentionally excluded — they live in the gap-filling flow.
 export function generatePriorityStack(
   summary: FinancialSummary
 ): PriorityStackSuggestion[] {
-  const stack: PriorityStackSuggestion[] = [];
-  let rank = 1;
+  // Build category totals from ALL entities (recurring + one-off), excluding
+  // income and unknown — those don't belong in the stack.
+  const buckets: Record<string, { monthly: number; total: number }> = {};
 
+  for (const entity of summary.allEntities) {
+    const cat = entity.category;
+    if (!cat || cat === "unknown" || cat === "income") continue;
+    if (!CATEGORY_TIER[cat]) continue; // skip categories we don't recognise
+
+    if (!buckets[cat]) buckets[cat] = { monthly: 0, total: 0 };
+    buckets[cat].monthly += entity.monthlyAmount;
+    buckets[cat].total += entity.totalAmount;
+  }
+
+  // Order: tier ascending, then monthly amount descending within tier
   const tierOrder = ["1", "2", "3", "4"];
-  const tierLabels: Record<string, string> = {
-    "1": "Non-negotiable",
-    "2": "Social Obligation",
-    "3": "Growth",
-    "4": "Lifestyle",
-  };
-
-  for (const tier of tierOrder) {
-    const tierEntities = summary.recurringObligations
-      .filter((e) => e.tier === tier)
-      .sort((a, b) => b.monthlyAmount - a.monthlyAmount);
-
-    for (const entity of tierEntities) {
-      stack.push({
-        rank: rank++,
-        label: entity.name,
-        monthlyAmount: entity.monthlyAmount,
-        tier,
-        category: entity.category,
-      });
-    }
-  }
-
-  // Add uncategorized recurring items at the end
-  const unknownRecurring = summary.recurringObligations.filter(
-    (e) => e.tier === "unknown"
-  );
-  for (const entity of unknownRecurring) {
-    stack.push({
-      rank: rank++,
-      label: entity.name,
-      monthlyAmount: entity.monthlyAmount,
-      tier: "unknown",
-      category: entity.category,
+  const sorted = Object.entries(buckets)
+    .map(([category, sums]) => ({
+      category,
+      monthlyAmount: Math.round(sums.monthly),
+      tier: CATEGORY_TIER[category],
+      label: CATEGORY_DISPLAY[category] || category,
+    }))
+    .filter((b) => b.monthlyAmount > 0)
+    .sort((a, b) => {
+      const ta = tierOrder.indexOf(a.tier);
+      const tb = tierOrder.indexOf(b.tier);
+      if (ta !== tb) return ta - tb;
+      return b.monthlyAmount - a.monthlyAmount;
     });
-  }
 
-  return stack;
+  return sorted.map((b, i) => ({
+    rank: i + 1,
+    label: b.label,
+    monthlyAmount: b.monthlyAmount,
+    tier: b.tier,
+    category: b.category,
+  }));
 }
