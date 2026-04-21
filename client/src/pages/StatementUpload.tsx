@@ -64,11 +64,10 @@ export const StatementUpload = (): JSX.Element => {
 
       const data = await resp.json();
 
-      // Persist jobId and stage atomically — avoids the React state race condition
-      // where setJobId/setStage would read stale `user` from closure
+      // Persist jobId and stage atomically in localStorage
       persistUser({ ...currentUser, jobId: data.jobId, stage: "analyzing" });
-      setStage("analyzing");
-      setLocation("/analyzing");
+      // Pass jobId in URL so SilentAnalysis doesn't depend on React state timing
+      setLocation(`/analyzing?job=${data.jobId}`);
     } catch (err: any) {
       setError(err.message || "Something went wrong. Please try again.");
     } finally {

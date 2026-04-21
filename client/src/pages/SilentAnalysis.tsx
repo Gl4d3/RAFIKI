@@ -14,15 +14,30 @@ const STAGES = [
 ];
 
 export const SilentAnalysis = (): JSX.Element => {
-  const [, setLocation] = useLocation();
+  const [location, setLocation] = useLocation();
   const { user, setStage } = useRafiki();
   const [progress, setProgress] = useState(5);
   const [label, setLabel] = useState("Starting...");
   const [error, setError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Read jobId from URL first (avoids React state timing issues),
+  // fall back to context user, then localStorage
+  const getJobId = (): string | null => {
+    const params = new URLSearchParams(window.location.search);
+    const urlJob = params.get("job");
+    if (urlJob) return urlJob;
+    if (user?.jobId) return user.jobId;
+    try {
+      const stored = localStorage.getItem("rafiki_user");
+      return stored ? JSON.parse(stored)?.jobId : null;
+    } catch {
+      return null;
+    }
+  };
+
   useEffect(() => {
-    const jobId = user?.jobId;
+    const jobId = getJobId();
     if (!jobId) {
       // No job — redirect to upload
       setLocation("/");
