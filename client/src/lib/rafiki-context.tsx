@@ -10,9 +10,10 @@ interface RafikiUser {
 
 interface RafikiContextType {
   user: RafikiUser | null;
-  initUser: (displayName?: string) => Promise<void>;
+  initUser: (displayName?: string) => Promise<RafikiUser>;
   setStage: (stage: string) => void;
   setJobId: (jobId: string) => void;
+  persistUser: (u: RafikiUser) => void;
   isLoading: boolean;
 }
 
@@ -41,17 +42,19 @@ export function RafikiProvider({ children }: { children: ReactNode }) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(u));
   };
 
-  const initUser = async (displayName?: string) => {
+  const initUser = async (displayName?: string): Promise<RafikiUser> => {
     const resp = await apiRequest("POST", "/api/user/init", {
       username: `rafiki_${Date.now()}`,
       displayName: displayName || null,
     });
     const data = await resp.json();
-    persist({
+    const newUser: RafikiUser = {
       userId: data.userId,
       displayName: displayName || "You",
       stage: data.stage || "upload",
-    });
+    };
+    persist(newUser);
+    return newUser;
   };
 
   const setStage = (stage: string) => {
@@ -65,7 +68,7 @@ export function RafikiProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <RafikiContext.Provider value={{ user, initUser, setStage, setJobId, isLoading }}>
+    <RafikiContext.Provider value={{ user, initUser, setStage, setJobId, persistUser: persist, isLoading }}>
       {children}
     </RafikiContext.Provider>
   );

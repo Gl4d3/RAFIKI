@@ -5,7 +5,7 @@ import { apiRequest } from "@/lib/queryClient";
 
 export const StatementUpload = (): JSX.Element => {
   const [, setLocation] = useLocation();
-  const { user, initUser, setJobId, setStage } = useRafiki();
+  const { user, initUser, persistUser, setStage } = useRafiki();
 
   const [mpesaFile, setMpesaFile] = useState<File | null>(null);
   const [bankFile, setBankFile] = useState<File | null>(null);
@@ -31,21 +31,16 @@ export const StatementUpload = (): JSX.Element => {
     setError(null);
 
     try {
-      // Init user if not already done
-      let userId = user?.userId;
-      if (!userId) {
-        await initUser(displayName || undefined);
-        // Re-read from context after async update — but context updates async
-        // so we fetch it from localStorage directly
-        const stored = localStorage.getItem("rafiki_user");
-        const parsed = stored ? JSON.parse(stored) : null;
-        userId = parsed?.userId;
+      // Init user if not already done — initUser returns the user synchronously
+      let currentUser = user;
+      if (!currentUser?.userId) {
+        currentUser = await initUser(displayName || undefined);
       }
 
-      if (!userId) throw new Error("Could not initialise user session.");
+      if (!currentUser?.userId) throw new Error("Could not initialise user session.");
 
       const formData = new FormData();
-      formData.append("userId", userId);
+      formData.append("userId", currentUser.userId);
       if (isDemo) {
         formData.append("demo", "true");
       } else if (mpesaFile) {
@@ -68,7 +63,10 @@ export const StatementUpload = (): JSX.Element => {
       }
 
       const data = await resp.json();
-      setJobId(data.jobId);
+
+      // Persist jobId and stage atomically — avoids the React state race condition
+      // where setJobId/setStage would read stale `user` from closure
+      persistUser({ ...currentUser, jobId: data.jobId, stage: "analyzing" });
       setStage("analyzing");
       setLocation("/analyzing");
     } catch (err: any) {
