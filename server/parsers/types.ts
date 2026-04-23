@@ -4,25 +4,39 @@
 
 export type TransactionDirection = "credit" | "debit";
 export type ParserSourceKind = "csv" | "pdf" | "sms" | "bank-pdf";
+// Which "account" the transaction came from. M-Pesa wallet vs bank account.
+// Used by Stage B's cross-source dedup pass to recognise internal
+// transfers (e.g. bank debit → M-Pesa credit on the same day).
+export type AccountKind = "mpesa" | "bank";
 
 export interface ParsedTransaction {
   date: Date;
-  amount: number;
+  amount: number; // always in KSh after currency normalisation
   direction: TransactionDirection;
   counterparty: string;
   counterpartyPhone?: string | null;
   reference: string;
   balance: number | null;
   transactionCost?: number | null;
-  currency: string;
+  currency: string; // post-normalisation currency, always "KES"
   rawText: string;
   sourceType?: ParserSourceKind;
   // Bank-statement extras (set by the bank-PDF parser only).
   fees?: { charge: number; excise: number };
-  // Filled in by the Accountant after cross-source analysis.
+  // Filled in by the Accountant after cross-source analysis OR by the
+  // Stage B mark_internal_transfer tool call.
   isInternalTransfer?: boolean;
   // Channel — distinguishes M-Pesa entries from bank entries downstream.
-  source?: "mpesa" | "bank";
+  // Defaults to "mpesa" when omitted. (Older code referred to this as
+  // "accountKind"; both names mean the same thing.)
+  source?: AccountKind;
+  // Preserved when a non-KSh source is normalised to KSh.
+  originalAmount?: number | null;
+  originalCurrency?: string | null;
+  fxRate?: number | null;
+  // Friendly label of the upload this transaction came from
+  // (e.g. "M-Pesa statement (April.csv)").
+  sourceName?: string | null;
 }
 
 // Input accepted by the source dispatcher.

@@ -2,7 +2,12 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import multer from "multer";
 import { storage } from "./storage";
-import { runAnalysisPipeline, type PipelineSource } from "./analysis-pipeline";
+import {
+  runAnalysisPipeline,
+  resumeAfterAiChoice,
+  hasPendingAi,
+  type PipelineSource,
+} from "./analysis-pipeline";
 
 // Strict aggregate caps to keep memory bounded:
 // - per file: 10MB
@@ -139,6 +144,7 @@ export async function registerRoutes(
             buffer: f.buffer,
             fileName: f.originalname,
             sourceName: `M-Pesa statement (${f.originalname})`,
+            source: "mpesa",
           });
         }
         for (const f of bankFiles) {
@@ -147,6 +153,7 @@ export async function registerRoutes(
             buffer: f.buffer,
             fileName: f.originalname,
             sourceName: `Bank statement (${f.originalname})`,
+            source: "bank",
           });
         }
         if (smsText) {
@@ -154,6 +161,7 @@ export async function registerRoutes(
             kind: "sms",
             text: smsText,
             sourceName: "M-Pesa SMS",
+            source: "mpesa",
           });
         }
 
@@ -207,6 +215,70 @@ export async function registerRoutes(
       res.status(500).json({ error: error.message });
     }
   });
+
+  // ── Resolve the "AI is offline" choice on a paused analysis job ──────────
+  // The user has two options: retry Stage B, or continue with the basic
+  // (deterministic) categorisation only. We never silently degrade —
+  // this is always an explicit user choice.
+  app.post(
+    "/api/onboarding/job/:jobId/ai-choice",
+    async (req: Request, res: Response) => {
+      try {
+        const { jobId } = req.params;
+        const { choice, userId } = req.body as {
+          choice?: string;
+          userId?: string;
+        };
+        if (choice !== "retry" && choice !== "basic") {
+          return res
+            .status(400)
+            .json({ error: "choice must be 'retry' or 'basic'" });
+        }
+        if (!userId || typeof userId !== "string") {
+          return res.status(400).json({ error: "userId is required" });
+        }
+        const job = await storage.getAnalysisJob(jobId);
+        if (!job) return res.status(404).json({ error: "Job not found" });
+        // Authz: only the user who owns the job may resume it. We
+        // intentionally return 404 rather than 403 to avoid leaking the
+        // existence of jobs that belong to other users.
+        if (job.userId !== userId) {
+          return res.status(404).json({ error: "Job not found" });
+        }
+        if (job.status !== "ai_unavailable") {
+          return res
+            .status(409)
+            .json({ error: `Job is in '${job.status}', not waiting on AI.` });
+        }
+        // Fail fast (and truthfully) if the in-memory pending state is
+        // gone — e.g. the server restarted between the pause and the
+        // user clicking a button. Without this check, a fire-and-forget
+        // resume would return ok:true while the job sits stuck forever.
+        if (!hasPendingAi(jobId)) {
+          await storage.updateAnalysisJob(jobId, {
+            status: "error",
+            error:
+              "This analysis can no longer be resumed. Please upload your statement again.",
+            progressLabel: "Analysis expired",
+          });
+          return res.status(410).json({
+            ok: false,
+            reason:
+              "This analysis can no longer be resumed. Please upload your statement again.",
+          });
+        }
+        // Resume in the background — the client polls. resumeAfterAiChoice
+        // mirrors any failure into the job row, so polling clients still
+        // see the truth even though we return immediately.
+        resumeAfterAiChoice(jobId, choice).catch((err) =>
+          console.error("Resume error:", err)
+        );
+        res.json({ ok: true });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    }
+  );
 
   // ── Submit gap-filling answer ────────────────────────────────────────────
   app.post("/api/onboarding/gap-fill", async (req: Request, res: Response) => {

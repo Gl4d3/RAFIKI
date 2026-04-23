@@ -15,7 +15,11 @@ import { normaliseBankCounterparty } from "./counterparty-normaliser";
 // We import it dynamically because it ships as ESM-only and we only need it
 // when a PDF is actually uploaded.
 async function loadPdfjs() {
-  return await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  // Disable the web worker — in Node.js there is no worker thread needed
+  // and mismatched worker binaries cause a version-mismatch error at runtime.
+  pdfjs.GlobalWorkerOptions.workerSrc = "";
+  return pdfjs;
 }
 
 interface RawItem {

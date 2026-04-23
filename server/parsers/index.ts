@@ -7,6 +7,25 @@ import { parseMpesaSms } from "./mpesa-sms";
 import { parseBankPdf } from "../bank-pdf-parser";
 import type { ParseSourceInput, ParsedTransaction } from "./types";
 import { SourceParseError } from "./types";
+import { normaliseToKsh } from "../currency";
+
+// Run every parsed transaction through normaliseToKsh so foreign-currency
+// rows (e.g. USD lines on a multi-currency bank statement) become KSh
+// before they enter the Accountant. KES rows are a no-op but still get
+// originalAmount/originalCurrency/fxRate populated for transparency.
+function normaliseAll(txs: ParsedTransaction[]): ParsedTransaction[] {
+  return txs.map((t) => {
+    const n = normaliseToKsh(t.amount, t.currency);
+    return {
+      ...t,
+      amount: n.amount,
+      currency: n.currency,
+      originalAmount: n.originalAmount,
+      originalCurrency: n.originalCurrency,
+      fxRate: n.fxRate,
+    };
+  });
+}
 
 function tagMpesa(txs: ParsedTransaction[]): ParsedTransaction[] {
   return txs.map((t) => ({ ...t, source: "mpesa" as const }));
@@ -50,26 +69,26 @@ export async function parseSource(
   const sourceName = input.sourceName || defaultSourceName(input);
 
   if (input.kind === "csv") {
-    return tagMpesa(parseMpesaCsv(input.buffer, sourceName));
+    return normaliseAll(tagMpesa(parseMpesaCsv(input.buffer, sourceName)));
   }
   if (input.kind === "pdf") {
-    return tagMpesa(await parseMpesaPdf(input.buffer, sourceName));
+    return normaliseAll(tagMpesa(await parseMpesaPdf(input.buffer, sourceName)));
   }
   if (input.kind === "sms") {
-    return tagMpesa(parseMpesaSms(input.text, sourceName));
+    return normaliseAll(tagMpesa(parseMpesaSms(input.text, sourceName)));
   }
   if (input.kind === "bank") {
-    return runBankPdf(input.buffer, sourceName);
+    return normaliseAll(await runBankPdf(input.buffer, sourceName));
   }
 
   // Auto-detect (M-Pesa only — bank statements must be uploaded with kind:"bank").
   if (input.buffer && input.buffer.length > 0) {
     const fname = (input.fileName || "").toLowerCase();
     if (looksLikePdf(input.buffer) || fname.endsWith(".pdf")) {
-      return tagMpesa(await parseMpesaPdf(input.buffer, sourceName));
+      return normaliseAll(tagMpesa(await parseMpesaPdf(input.buffer, sourceName)));
     }
     if (looksLikeCsv(input.buffer) || fname.endsWith(".csv")) {
-      return tagMpesa(parseMpesaCsv(input.buffer, sourceName));
+      return normaliseAll(tagMpesa(parseMpesaCsv(input.buffer, sourceName)));
     }
     throw new SourceParseError(
       sourceName,
@@ -79,7 +98,7 @@ export async function parseSource(
   }
 
   if (input.text && input.text.trim()) {
-    return tagMpesa(parseMpesaSms(input.text, sourceName));
+    return normaliseAll(tagMpesa(parseMpesaSms(input.text, sourceName)));
   }
 
   throw new SourceParseError(

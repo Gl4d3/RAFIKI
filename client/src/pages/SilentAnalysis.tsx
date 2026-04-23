@@ -19,6 +19,13 @@ export const SilentAnalysis = (): JSX.Element => {
   const [progress, setProgress] = useState(5);
   const [label, setLabel] = useState("Starting...");
   const [error, setError] = useState<string | null>(null);
+  const [aiPaused, setAiPaused] = useState<{
+    jobId: string;
+    reason: string;
+  } | null>(null);
+  const [aiChoiceSubmitting, setAiChoiceSubmitting] = useState<
+    null | "retry" | "basic"
+  >(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Read jobId from URL first (avoids React state timing issues),
@@ -60,6 +67,13 @@ export const SilentAnalysis = (): JSX.Element => {
         } else if (job.status === "error") {
           if (pollRef.current) clearInterval(pollRef.current);
           setError(job.error || "Analysis failed. Please try again.");
+        } else if (job.status === "ai_unavailable") {
+          // Pause polling and surface the explicit two-option choice.
+          if (pollRef.current) clearInterval(pollRef.current);
+          setAiPaused({
+            jobId,
+            reason: job.error || "RAFIKI's AI layer is offline right now.",
+          });
         }
       } catch (err) {
         console.error("Poll error:", err);
@@ -72,6 +86,118 @@ export const SilentAnalysis = (): JSX.Element => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, [user?.jobId]);
+
+  const handleAiChoice = async (choice: "retry" | "basic") => {
+    if (!aiPaused) return;
+    setAiChoiceSubmitting(choice);
+    try {
+      const resp = await fetch(
+        `/api/onboarding/job/${aiPaused.jobId}/ai-choice`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ choice, userId: user?.userId }),
+        }
+      );
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        setError(body?.error || "Couldn't submit your choice. Please try again.");
+        setAiChoiceSubmitting(null);
+        return;
+      }
+      // Resume polling for the resumed job.
+      setAiPaused(null);
+      setAiChoiceSubmitting(null);
+      pollRef.current = setInterval(async () => {
+        try {
+          const r = await fetch(`/api/onboarding/job/${aiPaused.jobId}`);
+          if (!r.ok) return;
+          const job = await r.json();
+          setProgress(job.progress || 5);
+          setLabel(job.progressLabel || "Processing...");
+          if (job.status === "complete") {
+            if (pollRef.current) clearInterval(pollRef.current);
+            setStage("reveal");
+            setTimeout(() => setLocation("/reveal"), 600);
+          } else if (job.status === "error") {
+            if (pollRef.current) clearInterval(pollRef.current);
+            setError(job.error || "Analysis failed. Please try again.");
+          } else if (job.status === "ai_unavailable") {
+            if (pollRef.current) clearInterval(pollRef.current);
+            setAiPaused({
+              jobId: aiPaused.jobId,
+              reason: job.error || "RAFIKI's AI layer is still offline.",
+            });
+          }
+        } catch {}
+      }, 1200);
+    } catch {
+      setAiChoiceSubmitting(null);
+      setError("Couldn't reach the server. Please try again.");
+    }
+  };
+
+  if (aiPaused) {
+    return (
+      <div
+        className="flex flex-col items-center justify-center min-h-screen px-6 bg-[#f9f9f9]"
+        style={{ fontFamily: "'Inter', sans-serif" }}
+        data-testid="state-ai-unavailable"
+      >
+        <div
+          className="w-full max-w-[390px] rounded-3xl p-5 bg-[#ffffff]"
+          style={{ boxShadow: "0 12px 32px rgba(0, 52, 43, 0.04)" }}
+        >
+          <div className="flex items-center gap-3 mb-5">
+            <div
+              className="w-2 h-2 rounded-full shrink-0"
+              style={{ background: "#FFA000" }}
+            />
+            <span className="text-[#3f4945] text-[10px] font-medium tracking-[0.5px] uppercase">
+              RAFIKI is offline
+            </span>
+          </div>
+          <h2 className="text-[#1a1c1c] text-2xl font-medium tracking-[-0.5px] leading-8 mb-3">
+            My AI layer can't reach me right now.
+          </h2>
+          <p
+            className="text-[#3f4945] text-base leading-7 mb-6"
+            data-testid="text-ai-unavailable-reason"
+          >
+            {aiPaused.reason} I can either try again, or finish with the
+            basic numbers-only view (your transactions are already
+            categorised — you'd just miss the smarter relationship and
+            transfer detection).
+          </p>
+          <div className="flex flex-col gap-3">
+            <button
+              onClick={() => handleAiChoice("retry")}
+              disabled={aiChoiceSubmitting !== null}
+              className="h-12 w-full rounded-full text-white text-sm font-medium disabled:opacity-60"
+              style={{
+                background:
+                  "linear-gradient(179deg, #00342b 0%, #004d40 100%)",
+                border: "none",
+              }}
+              data-testid="button-ai-retry"
+            >
+              {aiChoiceSubmitting === "retry" ? "Trying again..." : "Try again"}
+            </button>
+            <button
+              onClick={() => handleAiChoice("basic")}
+              disabled={aiChoiceSubmitting !== null}
+              className="h-12 w-full rounded-full text-sm font-medium bg-[#e8e8e8] text-[#00342b] disabled:opacity-60"
+              data-testid="button-ai-basic"
+            >
+              {aiChoiceSubmitting === "basic"
+                ? "Continuing..."
+                : "Continue with basic categorisation only"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (error) {
     return (
