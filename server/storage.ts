@@ -40,7 +40,7 @@ export interface IStorage {
   savePriorityStack(userId: string, items: { rank: number; label: string; monthlyAmount: number; tier: string }[]): Promise<void>;
 
   // Analysis jobs
-  createAnalysisJob(userId: string): Promise<AnalysisJob>;
+  createAnalysisJob(userId: string, init?: Partial<AnalysisJob>): Promise<AnalysisJob>;
   getAnalysisJob(id: string): Promise<AnalysisJob | undefined>;
   updateAnalysisJob(id: string, updates: Partial<AnalysisJob>): Promise<void>;
 }
@@ -162,10 +162,10 @@ export class DbStorage implements IStorage {
     );
   }
 
-  async createAnalysisJob(userId: string): Promise<AnalysisJob> {
+  async createAnalysisJob(userId: string, init: Partial<AnalysisJob> = {}): Promise<AnalysisJob> {
     const [job] = await db
       .insert(analysisJobs)
-      .values({ userId, status: "pending", progress: 0 })
+      .values({ userId, status: "pending", progress: 0, ...init })
       .returning();
     return job;
   }
@@ -278,7 +278,7 @@ export class MemStorage implements IStorage {
       });
     }
   }
-  async createAnalysisJob(userId: string): Promise<AnalysisJob> {
+  async createAnalysisJob(userId: string, init: Partial<AnalysisJob> = {}): Promise<AnalysisJob> {
     const job: AnalysisJob = {
       id: randomUUID(),
       userId,
@@ -289,9 +289,13 @@ export class MemStorage implements IStorage {
       unknownCount: null,
       revealMessage: null,
       summaryData: null,
+      attachedSources: [],
+      smsText: null,
+      annotation: null,
       error: null,
       createdAt: new Date(),
       updatedAt: new Date(),
+      ...init,
     };
     this.jobsList.set(job.id, job);
     return job;

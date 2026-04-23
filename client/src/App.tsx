@@ -7,6 +7,7 @@ import NotFound from "@/pages/not-found";
 import { RafikiProvider } from "@/lib/rafiki-context";
 
 import { StatementUpload } from "@/pages/StatementUpload";
+import { Annotation } from "@/pages/Annotation";
 import { SilentAnalysis } from "@/pages/SilentAnalysis";
 import { GapFilling } from "@/pages/GapFilling";
 import { PriorityStackReview } from "@/pages/PriorityStackReview";
@@ -17,6 +18,7 @@ function Router() {
   return (
     <Switch>
       <Route path="/" component={StatementUpload} />
+      <Route path="/annotate" component={Annotation} />
       <Route path="/analyzing" component={SilentAnalysis} />
       <Route path="/reveal" component={PriorityStackReview} />
       <Route path="/gap-filling" component={GapFilling} />

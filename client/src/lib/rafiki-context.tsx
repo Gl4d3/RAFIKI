@@ -8,6 +8,14 @@ interface RafikiUser {
   jobId?: string;
 }
 
+export interface PendingUpload {
+  mpesaFiles: File[];
+  bankFiles: File[];
+  smsText: string;
+  annotation: string;
+  displayName: string;
+}
+
 interface RafikiContextType {
   user: RafikiUser | null;
   initUser: (displayName?: string) => Promise<RafikiUser>;
@@ -15,6 +23,8 @@ interface RafikiContextType {
   setJobId: (jobId: string) => void;
   persistUser: (u: RafikiUser) => void;
   isLoading: boolean;
+  pendingUpload: PendingUpload | null;
+  setPendingUpload: (p: PendingUpload | null) => void;
 }
 
 const RafikiContext = createContext<RafikiContextType | null>(null);
@@ -24,6 +34,7 @@ const STORAGE_KEY = "rafiki_user";
 export function RafikiProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<RafikiUser | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [pendingUpload, setPendingUpload] = useState<PendingUpload | null>(null);
 
   useEffect(() => {
     // Try to restore from localStorage
@@ -68,7 +79,7 @@ export function RafikiProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <RafikiContext.Provider value={{ user, initUser, setStage, setJobId, persistUser: persist, isLoading }}>
+    <RafikiContext.Provider value={{ user, initUser, setStage, setJobId, persistUser: persist, isLoading, pendingUpload, setPendingUpload }}>
       {children}
     </RafikiContext.Provider>
   );

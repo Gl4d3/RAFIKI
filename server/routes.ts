@@ -4,9 +4,20 @@ import multer from "multer";
 import { storage } from "./storage";
 import { runAnalysisPipeline } from "./analysis-pipeline";
 
+// Strict aggregate caps to keep memory bounded:
+// - per file: 10MB
+// - per request: 12 files total, 60MB total bytes
+const MAX_FILE_BYTES = 10 * 1024 * 1024;
+const MAX_FILES_PER_REQUEST = 12;
+const MAX_TOTAL_BYTES_PER_REQUEST = 60 * 1024 * 1024;
+
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
+  limits: {
+    fileSize: MAX_FILE_BYTES,
+    files: MAX_FILES_PER_REQUEST,
+    fields: 20,
+  },
   fileFilter: (_req, file, cb) => {
     const allowed = ["text/csv", "application/csv", "application/pdf", "text/plain"];
     const ext = file.originalname.toLowerCase().split(".").pop();
@@ -27,13 +38,21 @@ export async function registerRoutes(
   app.post(
     "/api/onboarding/upload",
     upload.fields([
-      { name: "mpesa", maxCount: 1 },
-      { name: "bank", maxCount: 1 },
+      { name: "mpesa[]", maxCount: MAX_FILES_PER_REQUEST },
+      { name: "bank[]", maxCount: MAX_FILES_PER_REQUEST },
+      // Accept legacy unbracketed names too for backwards-compat. The
+      // multer-level `files` cap (MAX_FILES_PER_REQUEST) bounds the
+      // *aggregate* count across all fields, so this can't multiply
+      // capacity.
+      { name: "mpesa", maxCount: MAX_FILES_PER_REQUEST },
+      { name: "bank", maxCount: MAX_FILES_PER_REQUEST },
     ]),
     async (req: Request, res: Response) => {
       try {
         const userId = req.body.userId as string;
         const isDemo = req.body.demo === "true";
+        const smsText = (req.body.smsText as string | undefined)?.trim() || null;
+        const annotation = (req.body.annotation as string | undefined)?.trim() || null;
 
         if (!userId) {
           return res.status(400).json({ error: "userId is required" });
@@ -45,8 +64,63 @@ export async function registerRoutes(
           return res.status(404).json({ error: "User not found" });
         }
 
-        // Create analysis job
-        const job = await storage.createAnalysisJob(userId);
+        const files = req.files as { [fieldname: string]: Express.Multer.File[] };
+        const mpesaFiles = [...(files?.["mpesa[]"] || []), ...(files?.mpesa || [])];
+        const bankFiles = [...(files?.["bank[]"] || []), ...(files?.bank || [])];
+
+        // Aggregate-bytes cap (defence in depth on top of multer's per-file
+        // and per-request-file-count limits).
+        const totalBytes = [...mpesaFiles, ...bankFiles].reduce(
+          (n, f) => n + f.size,
+          0
+        );
+        if (totalBytes > MAX_TOTAL_BYTES_PER_REQUEST) {
+          return res.status(413).json({
+            error: `Total upload size exceeds ${Math.round(
+              MAX_TOTAL_BYTES_PER_REQUEST / (1024 * 1024)
+            )}MB. Try fewer or smaller files.`,
+          });
+        }
+
+        // Honesty rule: NEVER silently substitute demo data when a real upload
+        // is expected. Either the user opts into the demo path or they must
+        // attach at least one source (file or pasted SMS text).
+        const hasAnySource = mpesaFiles.length > 0 || bankFiles.length > 0 || !!smsText;
+        if (!isDemo && !hasAnySource) {
+          return res.status(400).json({
+            error:
+              "No sources attached. Add at least one M-Pesa or bank statement, or paste M-Pesa SMS text.",
+          });
+        }
+
+        const sourceFormatOf = (name: string): "pdf" | "csv" | "other" => {
+          const ext = name.toLowerCase().split(".").pop();
+          if (ext === "pdf") return "pdf";
+          if (ext === "csv") return "csv";
+          return "other";
+        };
+
+        const attachedSources = [
+          ...mpesaFiles.map((f) => ({
+            fileName: f.originalname,
+            kind: "mpesa" as const,
+            size: f.size,
+            sourceFormat: sourceFormatOf(f.originalname),
+          })),
+          ...bankFiles.map((f) => ({
+            fileName: f.originalname,
+            kind: "bank" as const,
+            size: f.size,
+            sourceFormat: sourceFormatOf(f.originalname),
+          })),
+        ];
+
+        // Create analysis job with all the upload context attached.
+        const job = await storage.createAnalysisJob(userId, {
+          attachedSources,
+          smsText,
+          annotation,
+        });
 
         // Update user with job ID and stage
         await storage.updateUser(userId, {
@@ -54,23 +128,17 @@ export async function registerRoutes(
           onboardingJobId: job.id,
         });
 
-        // Get file buffer
-        const files = req.files as { [fieldname: string]: Express.Multer.File[] };
-        const mpesaFile = files?.mpesa?.[0];
+        // For now the pipeline can only consume an M-Pesa CSV. Prefer the
+        // first parseable CSV (regardless of upload order); fall back to the
+        // first file so the pipeline can raise an honest error if there's
+        // nothing it can read. The remaining files, SMS text, and annotation
+        // are persisted on the job for the next task (multi-source parsing).
+        const primary =
+          mpesaFiles.find((f) => f.originalname.toLowerCase().endsWith(".csv")) ||
+          mpesaFiles[0];
+        const fileBuffer = primary?.buffer || Buffer.alloc(0);
+        const fileName = primary?.originalname || null;
 
-        // Honesty rule: NEVER silently substitute demo data when a real upload
-        // is expected. Either the user explicitly opted into the demo path,
-        // or they must provide a file.
-        if (!isDemo && !mpesaFile) {
-          return res.status(400).json({
-            error: "No statement uploaded. Please attach an M-Pesa CSV or PDF.",
-          });
-        }
-
-        const fileBuffer = mpesaFile?.buffer || Buffer.alloc(0);
-        const fileName = mpesaFile?.originalname || null;
-
-        // Run pipeline in background (don't await)
         runAnalysisPipeline(job.id, userId, fileBuffer, isDemo, fileName).catch(
           (err) => console.error("Pipeline error:", err)
         );

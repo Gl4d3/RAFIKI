@@ -117,6 +117,14 @@ export const priorityStackItems = pgTable("priority_stack_items", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// Source descriptor for an attached file on an analysis job
+export interface SourceDescriptor {
+  fileName: string;
+  kind: "mpesa" | "bank";
+  size: number;
+  sourceFormat: "pdf" | "csv" | "other";
+}
+
 // Analysis jobs (for async processing)
 export const analysisJobs = pgTable("analysis_jobs", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
@@ -130,6 +138,9 @@ export const analysisJobs = pgTable("analysis_jobs", {
   unknownCount: integer("unknown_count"),
   revealMessage: text("reveal_message"),
   summaryData: jsonb("summary_data"),
+  attachedSources: jsonb("attached_sources").$type<SourceDescriptor[]>().default([]),
+  smsText: text("sms_text"),
+  annotation: text("annotation"),
   error: text("error"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),

@@ -8,6 +8,13 @@
       "when": 1776684483675,
       "tag": "0000_ordinary_quasimodo",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1776958090405,
+      "tag": "0001_sticky_loners",
+      "breakpoints": true
     }
   ]
 }

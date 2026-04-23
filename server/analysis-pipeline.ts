@@ -35,10 +35,17 @@ export async function runAnalysisPipeline(
     if (isDemo) {
       const { generateDemoTransactions } = await import("./parser");
       parsed = generateDemoTransactions();
-    } else {
+    } else if (fileName && fileName.toLowerCase().endsWith(".csv") && fileBuffer.length > 0) {
       // Deterministic parse — failures here are HARD errors (we never silently
       // substitute demo data for a real upload).
       parsed = parseMpesaCsv(fileBuffer, fileName);
+    } else {
+      // We accepted the upload (bank PDF / SMS / M-Pesa PDF) so it's stored
+      // on the job for the next pipeline release, but we can't analyse it
+      // today. Be honest about that — don't pretend we processed something.
+      throw new Error(
+        "I've kept your sources and your note, but I can only analyse M-Pesa CSV exports today. PDF and SMS parsing lands in the next release — please add an M-Pesa CSV, or try the sample data."
+      );
     }
 
     await updateJob(20, `Found ${parsed.length} transactions. Identifying patterns...`);
