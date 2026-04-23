@@ -87,7 +87,8 @@ export async function runAnalysisPipeline(
     storage.updateAnalysisJob(jobId, { progress, progressLabel: label, status: "running" });
 
   try {
-    await updateJob(5, "Reading your statement...");
+    // Stage A — extraction
+    await updateJob(5, "Reading your files...");
     await sleep(300);
 
     let parsed: ParsedTransaction[];
@@ -129,27 +130,25 @@ export async function runAnalysisPipeline(
       parsed.sort((a, b) => a.date.getTime() - b.date.getTime());
     }
 
-    await updateJob(20, `Found ${parsed.length} transactions. Identifying patterns...`);
-    await sleep(400);
+    // Stage A complete — count is honest, drawn from the parsed set.
+    await updateJob(
+      25,
+      `Identifying your transactions... (${parsed.length} found)`
+    );
+    await sleep(300);
 
-    // Stage A2 — deterministic categorisation
+    // Stage B — enrichment. Deterministic categorisation, recurring,
+    // salary, internal-transfer tagging, and (further down) the LLM
+    // tool-calling enrichment all live under one honest label so the
+    // user sees a single Stage B narration rather than five micro-steps.
+    await updateJob(45, "Understanding your spending patterns...");
     let categorized = categorizeTransactions(parsed);
-    await updateJob(35, "Categorising transactions...");
-    await sleep(200);
-
     categorized = detectInternalTransfers(categorized);
-    await updateJob(45, "Spotting internal transfers...");
-    await sleep(150);
-
     categorized = identifyRecurring(categorized);
-    await updateJob(45, "Finding recurring obligations...");
-    await sleep(200);
-
     categorized = identifySalary(categorized);
-    await updateJob(55, "Identifying income sources...");
     await sleep(200);
 
-    // Cross-source dedup before Stage B
+    // Cross-source dedup before Stage B (LLM)
     const enrichable = toEnrichable(categorized);
     const candidatePairs = tagInternalTransferCandidates(enrichable);
 
@@ -168,8 +167,6 @@ export async function runAnalysisPipeline(
       candidatePairs,
       annotation,
     });
-
-    await updateJob(65, "Asking RAFIKI to review...");
 
     // Stage B — LLM enrichment. If Gemini is unavailable, pause the job
     // and surface a typed choice to the UI.
@@ -283,10 +280,11 @@ async function finishWithEnriched(
   candidatePairCount: number,
   opts: { basicOnly: boolean; aiDegradedReason: string | null }
 ): Promise<void> {
+  // Stage C — aggregation into a financial picture + priority stack.
   await storage.updateAnalysisJob(jobId, {
     status: "running",
     progress: 78,
-    progressLabel: "Building your financial model...",
+    progressLabel: "Building your financial picture...",
   });
 
   const finalCategorized: CategorizedTransaction[] = stripStageBFields(enrichable);
@@ -361,9 +359,17 @@ async function finishWithEnriched(
   }
 
   // Gap-filling questions — deterministic when the AI is degraded so we
-  // don't keep banging on a known-down service.
+  // don't keep banging on a known-down service. Sort unknowns by impact
+  // (largest unknown total first, then most recurring) so the user sees
+  // the biggest gaps first. computeFinancialSummary already filters out
+  // auto-resolved / categorised entities, so every entity here is a
+  // genuine flag.
+  const ranked = [...summary.unknownEntities].sort((a, b) => {
+    if (b.totalAmount !== a.totalAmount) return b.totalAmount - a.totalAmount;
+    return b.occurrences - a.occurrences;
+  });
   const unknownsWithQuestions: any[] = [];
-  for (const entity of summary.unknownEntities.slice(0, 8)) {
+  for (const entity of ranked.slice(0, 8)) {
     let question: string;
     if (aiDegraded) {
       question = buildOfflineGapQuestion(entity);
@@ -381,11 +387,21 @@ async function finishWithEnriched(
         }
       }
     }
+    const { identifier, resolvedName } = extractIdentifierAndName(
+      finalCategorized,
+      entity.normalizedName,
+      entity.name
+    );
     unknownsWithQuestions.push({
       entityId: entityMap[entity.normalizedName] || "",
       name: entity.name,
+      identifier,
+      resolvedName,
       amount: entity.monthlyAmount,
+      totalAmount: entity.totalAmount,
       occurrences: entity.occurrences,
+      frequency: entity.frequency,
+      frequencyPhrase: frequencyPhrase(entity.frequency, entity.occurrences),
       lastSeen: entity.lastSeen.toISOString(),
       question,
     });
@@ -436,4 +452,45 @@ async function finishWithEnriched(
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Pull the raw counterparty identifier (phone or paybill digits) out of
+// the first matching transaction, plus any name an M-Pesa SMS attached
+// to that number. Falls back gracefully when neither is present.
+function extractIdentifierAndName(
+  txs: { counterparty: string }[],
+  normalizedName: string,
+  friendlyName: string
+): { identifier: string; resolvedName: string | null } {
+  const sample = txs.find(
+    (t) => t.counterparty.toLowerCase().trim() === normalizedName
+  );
+  const raw = sample?.counterparty ?? friendlyName;
+  const phone = raw.match(/\b(0[17]\d{8})\b/);
+  if (phone) {
+    const rest = raw.replace(phone[0], "").trim();
+    const name = rest && rest.toLowerCase() !== phone[1] ? rest : null;
+    return { identifier: phone[1], resolvedName: name };
+  }
+  const paybill = raw.match(/\b(\d{4,8})\b/);
+  if (paybill) {
+    const rest = raw.replace(paybill[0], "").trim();
+    return { identifier: paybill[1], resolvedName: rest || null };
+  }
+  return { identifier: friendlyName, resolvedName: null };
+}
+
+function frequencyPhrase(frequency: string, occurrences: number): string {
+  switch (frequency) {
+    case "weekly":
+      return `About once a week · ${occurrences} times`;
+    case "monthly":
+      return `About once a month · ${occurrences} times`;
+    case "quarterly":
+      return `Every few months · ${occurrences} times`;
+    default:
+      return occurrences === 1
+        ? "One-off so far"
+        : `${occurrences} times, irregularly`;
+  }
 }

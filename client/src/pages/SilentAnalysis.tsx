@@ -2,15 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { useRafiki } from "@/lib/rafiki-context";
 
+// Four honest stage labels matching the analysis pipeline. The server's
+// progressLabel takes precedence — this list only feeds the small
+// "history" trail under the spinner so the user sees what's already done.
 const STAGES = [
-  { label: "Reading your statement...", pct: 10 },
-  { label: "Identifying transactions...", pct: 25 },
-  { label: "Categorising spending...", pct: 45 },
-  { label: "Finding recurring obligations...", pct: 60 },
-  { label: "Identifying income sources...", pct: 75 },
-  { label: "Building your financial model...", pct: 85 },
-  { label: "RAFIKI is reading your results...", pct: 92 },
-  { label: "Almost ready...", pct: 97 },
+  { label: "Reading your files...", pct: 5 },
+  { label: "Identifying your transactions...", pct: 25 },
+  { label: "Understanding your spending patterns...", pct: 45 },
+  { label: "Building your financial picture...", pct: 70 },
 ];
 
 export const SilentAnalysis = (): JSX.Element => {

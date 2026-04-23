@@ -288,20 +288,52 @@ export async function registerRoutes(
         return res.status(400).json({ error: "entityId and category are required" });
       }
 
-      // Determine tier from category
-      const tierMap: Record<string, string> = {
-        rent: "1", utilities: "1", transport: "1", food: "1", healthcare: "1",
-        family: "2", chama: "2", education: "2",
-        savings: "3",
-        entertainment: "4", merchant: "4", one_time: "4",
+      // Map the Kenyan-context answer chips onto the existing entity
+      // category enum. domestic_worker / debt / friend don't have their
+      // own enum slot yet, so we land them on the closest existing one
+      // and preserve the user's exact answer in `notes` so nothing is
+      // lost. Tier follows the answer, not the storage category.
+      const categoryMap: Record<string, string> = {
+        family: "family",
+        chama: "chama",
+        domestic_worker: "family",
+        debt: "one_time",
+        business: "business",
+        friend: "one_time",
         unknown: "unknown",
       };
+      const tierMap: Record<string, string> = {
+        family: "2",
+        chama: "2",
+        domestic_worker: "2",
+        debt: "1",
+        business: "4",
+        friend: "4",
+        unknown: "unknown",
+      };
+      const labelMap: Record<string, string> = {
+        family: "Family or relative",
+        chama: "Chama or savings group",
+        domestic_worker: "Domestic worker",
+        debt: "Debt repayment",
+        business: "Business",
+        friend: "Friend (one-off)",
+      };
+
+      const storedCategory = categoryMap[category] || "unknown";
+      const storedTier = tierMap[category] || "unknown";
+      const storedNotes =
+        category === "unknown"
+          ? notes || null
+          : labelMap[category]
+            ? `${labelMap[category]}${notes ? ` — ${notes}` : ""}`
+            : notes || null;
 
       await storage.updateEntity(entityId, {
-        category: category as any,
-        tier: (tierMap[category] || "unknown") as any,
+        category: storedCategory as any,
+        tier: storedTier as any,
         isUserResolved: true,
-        notes: notes || null,
+        notes: storedNotes,
       });
 
       res.json({ success: true });

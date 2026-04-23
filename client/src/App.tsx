@@ -20,7 +20,9 @@ function Router() {
       <Route path="/" component={StatementUpload} />
       <Route path="/annotate" component={Annotation} />
       <Route path="/analyzing" component={SilentAnalysis} />
-      <Route path="/reveal" component={PriorityStackReview} />
+      {/* /reveal lands on gap-filling; if there are no unknowns it
+          immediately advances to /priority-stack-review on its own. */}
+      <Route path="/reveal" component={GapFilling} />
       <Route path="/gap-filling" component={GapFilling} />
       <Route path="/priority-stack-review" component={PriorityStackReview} />
       <Route path="/priority-stack" component={PriorityStack} />
