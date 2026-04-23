@@ -4,7 +4,7 @@
 import { parseMpesaCsv } from "./mpesa-csv";
 import { parseMpesaPdf } from "./mpesa-pdf";
 import { parseMpesaSms } from "./mpesa-sms";
-import { parseBankPdf } from "../bank-pdf-parser";
+import { parseBankPdf } from "./bank-pdf";
 import type { ParseSourceInput, ParsedTransaction } from "./types";
 import { SourceParseError } from "./types";
 import { normaliseToKsh } from "../currency";
@@ -36,17 +36,17 @@ async function runBankPdf(
   sourceName: string
 ): Promise<ParsedTransaction[]> {
   try {
-    const txs = await parseBankPdf(buffer);
-    // Bank parser returns the legacy ParsedTransaction shape; coerce
-    // missing optional fields and tag the channel.
-    return txs.map((t: any) => ({
-      currency: "KES",
+    const txs = await parseBankPdf(buffer, sourceName);
+    return txs.map((t) => ({
       ...t,
       source: "bank" as const,
       sourceType: "bank-pdf" as const,
-    })) as ParsedTransaction[];
-  } catch (err: any) {
-    throw new SourceParseError(sourceName, "pdf", err?.message ?? String(err));
+    }));
+  } catch (err: unknown) {
+    // Re-throw SourceParseError as-is to avoid double-wrapping the message.
+    if (err instanceof SourceParseError) throw err;
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new SourceParseError(sourceName, "pdf", msg);
   }
 }
 
