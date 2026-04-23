@@ -75,16 +75,45 @@ export const SilentAnalysis = (): JSX.Element => {
 
   if (error) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen bg-[#f9f9f9] px-6">
-        <p className="text-[#1a1c1c] text-lg font-medium mb-2">Something went wrong</p>
-        <p className="text-[#3f4945] text-sm text-center mb-8">{error}</p>
-        <button
-          onClick={() => setLocation("/")}
-          className="h-12 px-8 rounded-full text-white text-sm font-medium"
-          style={{ background: "linear-gradient(179deg, #00342b 0%, #004d40 100%)", border: "none" }}
+      <div
+        className="flex flex-col items-center justify-center min-h-screen px-6 bg-[#f9f9f9]"
+        style={{ fontFamily: "'Inter', sans-serif" }}
+        data-testid="state-analysis-error"
+      >
+        <div
+          className="w-full max-w-[390px] rounded-3xl p-5 bg-[#ffffff]"
+          style={{ boxShadow: "0 12px 32px rgba(0, 52, 43, 0.04)" }}
         >
-          Try again
-        </button>
+          {/* Amber status dot — warm, not alarming */}
+          <div className="flex items-center gap-3 mb-5">
+            <div
+              className="w-2 h-2 rounded-full shrink-0"
+              style={{ background: "#FFA000" }}
+            />
+            <span className="text-[#3f4945] text-[10px] font-medium tracking-[0.5px] uppercase">
+              Couldn't read your statement
+            </span>
+          </div>
+          <h2 className="text-[#1a1c1c] text-2xl font-medium tracking-[-0.5px] leading-8 mb-3">
+            Something didn't quite work.
+          </h2>
+          <p className="text-[#3f4945] text-base leading-7 mb-8" data-testid="text-analysis-error">
+            {error}
+          </p>
+          <div className="flex flex-col gap-3">
+            <button
+              onClick={() => setLocation("/")}
+              className="h-12 w-full rounded-full text-white text-sm font-medium"
+              style={{
+                background: "linear-gradient(179deg, #00342b 0%, #004d40 100%)",
+                border: "none",
+              }}
+              data-testid="button-error-retry"
+            >
+              Try a different file
+            </button>
+          </div>
+        </div>
       </div>
     );
   }

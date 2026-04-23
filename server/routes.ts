@@ -57,10 +57,21 @@ export async function registerRoutes(
         // Get file buffer
         const files = req.files as { [fieldname: string]: Express.Multer.File[] };
         const mpesaFile = files?.mpesa?.[0];
+
+        // Honesty rule: NEVER silently substitute demo data when a real upload
+        // is expected. Either the user explicitly opted into the demo path,
+        // or they must provide a file.
+        if (!isDemo && !mpesaFile) {
+          return res.status(400).json({
+            error: "No statement uploaded. Please attach an M-Pesa CSV or PDF.",
+          });
+        }
+
         const fileBuffer = mpesaFile?.buffer || Buffer.alloc(0);
+        const fileName = mpesaFile?.originalname || null;
 
         // Run pipeline in background (don't await)
-        runAnalysisPipeline(job.id, userId, fileBuffer, isDemo || !mpesaFile).catch(
+        runAnalysisPipeline(job.id, userId, fileBuffer, isDemo, fileName).catch(
           (err) => console.error("Pipeline error:", err)
         );
 

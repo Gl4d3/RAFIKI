@@ -10,13 +10,19 @@ import {
   computeFinancialSummary,
   generatePriorityStack,
 } from "./accountant";
-import { generateRevealMessage } from "./gemini";
+import {
+  generateRevealMessage,
+  buildOfflineRevealMessage,
+  buildOfflineGapQuestion,
+  GeminiUnavailableError,
+} from "./gemini";
 
 export async function runAnalysisPipeline(
   jobId: string,
   userId: string,
   fileBuffer: Buffer,
-  isDemo: boolean = false
+  isDemo: boolean = false,
+  fileName: string | null = null
 ): Promise<void> {
   const updateJob = (progress: number, label: string) =>
     storage.updateAnalysisJob(jobId, { progress, progressLabel: label, status: "running" });
@@ -30,11 +36,9 @@ export async function runAnalysisPipeline(
       const { generateDemoTransactions } = await import("./parser");
       parsed = generateDemoTransactions();
     } else {
-      try {
-        parsed = parseMpesaCsv(fileBuffer);
-      } catch (err: any) {
-        throw new Error(`Could not read your statement: ${err.message}`);
-      }
+      // Deterministic parse — failures here are HARD errors (we never silently
+      // substitute demo data for a real upload).
+      parsed = parseMpesaCsv(fileBuffer, fileName);
     }
 
     await updateJob(20, `Found ${parsed.length} transactions. Identifying patterns...`);
@@ -109,16 +113,49 @@ export async function runAnalysisPipeline(
 
     await updateJob(88, "RAFIKI is reading your results...");
 
-    // Generate AI reveal message
-    const revealMessage = await generateRevealMessage(summary);
+    // AI layer — DEGRADE GRACEFULLY but HONESTLY.
+    // If Gemini is unavailable, finish the job with deterministic content
+    // and a flag so the UI can tell the user "AI is offline".
+    let aiDegraded = false;
+    let aiDegradedReason: string | null = null;
+    let revealMessage: string;
+    try {
+      revealMessage = await generateRevealMessage(summary);
+    } catch (err: any) {
+      if (err instanceof GeminiUnavailableError) {
+        aiDegraded = true;
+        aiDegradedReason = err.reason;
+        revealMessage = buildOfflineRevealMessage(summary);
+        console.warn("AI degraded:", err.reason);
+      } else {
+        throw err;
+      }
+    }
     await updateJob(95, "Almost ready...");
     await sleep(200);
 
-    // Generate AI gap-filling questions for unknowns
+    // Generate gap-filling questions. If AI is already known to be down,
+    // use deterministic questions and don't keep retrying.
     const unknownsWithQuestions = [];
     for (const entity of summary.unknownEntities.slice(0, 8)) {
-      const { generateGapFillingQuestion } = await import("./gemini");
-      const question = await generateGapFillingQuestion(entity);
+      let question: string;
+      if (aiDegraded) {
+        question = buildOfflineGapQuestion(entity);
+      } else {
+        try {
+          const { generateGapFillingQuestion } = await import("./gemini");
+          question = await generateGapFillingQuestion(entity);
+        } catch (err: any) {
+          if (err instanceof GeminiUnavailableError) {
+            aiDegraded = true;
+            aiDegradedReason = err.reason;
+            question = buildOfflineGapQuestion(entity);
+            console.warn("AI degraded mid-loop:", err.reason);
+          } else {
+            throw err;
+          }
+        }
+      }
       unknownsWithQuestions.push({
         entityId: entityMap[entity.normalizedName] || "",
         name: entity.name,
@@ -147,6 +184,8 @@ export async function runAnalysisPipeline(
       healthScore: summary.healthScore,
       estimatedBalance: summary.estimatedBalance,
       priorityStack,
+      aiDegraded,
+      aiDegradedReason,
     };
 
     await storage.updateAnalysisJob(jobId, {

@@ -16,7 +16,17 @@ export interface ParsedTransaction {
 
 // Parse M-Pesa CSV statement
 // M-Pesa CSV columns vary by export version — we handle both common formats
-export function parseMpesaCsv(buffer: Buffer): ParsedTransaction[] {
+export function parseMpesaCsv(buffer: Buffer, fileName?: string | null): ParsedTransaction[] {
+  // Honest detection: PDF parsing is not yet supported.
+  // Magic bytes "%PDF" identify a PDF regardless of extension.
+  const isPdfBytes = buffer.length >= 4 && buffer.slice(0, 4).toString("ascii") === "%PDF";
+  const isPdfName = !!fileName && fileName.toLowerCase().endsWith(".pdf");
+  if (isPdfBytes || isPdfName) {
+    throw new Error(
+      "PDF statement parsing isn't supported yet. Please export your M-Pesa statement as CSV from the Safaricom self-care portal."
+    );
+  }
+
   const text = buffer.toString("utf-8");
 
   // Try to find the data section (M-Pesa CSVs often have header metadata rows)

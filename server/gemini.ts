@@ -12,44 +12,83 @@ const generationConfig = {
   maxOutputTokens: 1024,
 };
 
-// Primary model — fast, cheap. Falls back to the heavier Pro model if it's
-// rate-limited or returns 503 / quota errors.
-const primaryModel = genAI.getGenerativeModel({
-  model: "gemini-3.1-flash-lite-preview",
-  generationConfig,
-});
+// Model chain — try fast/cheap first, then heavier, then preview.
+// We keep this list short and explicit so it's easy to audit.
+const MODEL_CHAIN = [
+  "gemini-2.5-flash",
+  "gemini-2.5-pro",
+  "gemini-3.1-flash-lite-preview",
+];
 
-const fallbackModel = genAI.getGenerativeModel({
-  model: "gemini-2.5-pro",
-  generationConfig,
-});
+// Typed error so the pipeline can tell "AI is unavailable" apart from
+// "the rest of the system is broken".
+export class GeminiUnavailableError extends Error {
+  reason: string;
+  status: number | undefined;
+  constructor(reason: string, status?: number) {
+    super(reason);
+    this.name = "GeminiUnavailableError";
+    this.reason = reason;
+    this.status = status;
+  }
+}
 
-// Errors worth retrying on the fallback model
-function isOverloadedError(err: any): boolean {
+// Errors worth retrying on the next model in the chain
+function isTransientError(err: any): boolean {
   const status = err?.status ?? err?.response?.status;
-  if (status === 503 || status === 429 || status === 500) return true;
+  if (status === 503 || status === 500) return true;
   const msg = String(err?.message || "").toLowerCase();
   return (
     msg.includes("overloaded") ||
     msg.includes("high demand") ||
-    msg.includes("rate") ||
-    msg.includes("quota") ||
     msg.includes("unavailable")
   );
 }
 
+// Quota / billing problems aren't worth retrying on another model — same key.
+function isQuotaError(err: any): boolean {
+  const status = err?.status ?? err?.response?.status;
+  if (status === 429) return true;
+  const msg = String(err?.message || "").toLowerCase();
+  return (
+    msg.includes("quota") ||
+    msg.includes("credits are depleted") ||
+    msg.includes("billing")
+  );
+}
+
 async function generateWithFallback(prompt: string): Promise<string> {
-  try {
-    const result = await primaryModel.generateContent(prompt);
-    return result.response.text().trim();
-  } catch (err: any) {
-    if (!isOverloadedError(err)) throw err;
-    console.warn(
-      `Primary Gemini model busy (${err?.status || "?"}). Retrying on gemini-2.5-pro...`
-    );
-    const result = await fallbackModel.generateContent(prompt);
-    return result.response.text().trim();
+  let lastErr: any = null;
+  for (const modelName of MODEL_CHAIN) {
+    try {
+      const model = genAI.getGenerativeModel({ model: modelName, generationConfig });
+      const result = await model.generateContent(prompt);
+      return result.response.text().trim();
+    } catch (err: any) {
+      lastErr = err;
+      if (isQuotaError(err)) {
+        // No point trying other models — same key, same quota.
+        throw new GeminiUnavailableError(
+          "Gemini API quota or billing limit reached.",
+          err?.status
+        );
+      }
+      if (!isTransientError(err)) {
+        // Hard error (auth, bad request, etc.) — surface it.
+        throw new GeminiUnavailableError(
+          err?.message || "Gemini API error",
+          err?.status
+        );
+      }
+      console.warn(
+        `Gemini model "${modelName}" busy (${err?.status || "?"}). Trying next in chain...`
+      );
+    }
   }
+  throw new GeminiUnavailableError(
+    "All Gemini models are currently unavailable. Please try again shortly.",
+    lastErr?.status
+  );
 }
 
 // RAFIKI system personality
@@ -100,16 +139,19 @@ Rules:
 - Sound warm and human, not like a bank statement
 - Do NOT list everything — pick the 1-2 most interesting findings and focus on those`;
 
-  try {
-    return await generateWithFallback(prompt);
-  } catch (error) {
-    console.error("Gemini error (both models failed):", error);
-    // Final fallback to template if both AI models fail
-    const cat = topCategory
-      ? `KSh ${topCategory.total.toLocaleString()} on ${topCategory.label}`
-      : "significant amounts";
-    return `I've gone through your M-Pesa history and I can see a clear picture of your money. You're spending ${cat} — that stood out to me. Your salary from ${summary.salarySource} is coming in at around KSh ${summary.estimatedSalary.toLocaleString()} a month. Does that look right to you?`;
-  }
+  // Let GeminiUnavailableError bubble up — the pipeline decides whether to
+  // degrade gracefully or surface the failure to the user.
+  return await generateWithFallback(prompt);
+}
+
+// A deterministic, clearly-labelled message for when the AI layer is down.
+// We never silently substitute this — the caller must mark it as degraded.
+export function buildOfflineRevealMessage(summary: FinancialSummary): string {
+  const top = summary.topCategories[0];
+  const cat = top
+    ? `KSh ${top.total.toLocaleString()} on ${top.label}`
+    : "significant amounts";
+  return `Here's what I found in your statement: you're spending ${cat}, and your salary from ${summary.salarySource} comes in at around KSh ${summary.estimatedSalary.toLocaleString()} a month. (My AI layer is offline right now, so this is the basic numbers-only view — full insights will return once the service is back.)`;
 }
 
 export async function generateGapFillingQuestion(
@@ -136,10 +178,12 @@ The question should:
 
 Example style: "I keep seeing KSh 2,000 going to Peter every month — is that a regular debt repayment or family support?"`;
 
-  try {
-    return await generateWithFallback(prompt);
-  } catch (error) {
-    console.error("Gemini error (both models failed):", error);
-    return `I noticed ${entity.occurrences} payments to "${entity.name}" totalling KSh ${entity.totalAmount.toLocaleString()}. What is this for?`;
-  }
+  // Bubble up GeminiUnavailableError; the pipeline catches it once and falls
+  // back to a deterministic question for the whole batch.
+  return await generateWithFallback(prompt);
+}
+
+// Deterministic gap-filling question for when AI is offline. Honest, specific.
+export function buildOfflineGapQuestion(entity: EntitySummary): string {
+  return `I noticed ${entity.occurrences} payments to "${entity.name}" totalling KSh ${entity.totalAmount.toLocaleString()}. What is this for?`;
 }

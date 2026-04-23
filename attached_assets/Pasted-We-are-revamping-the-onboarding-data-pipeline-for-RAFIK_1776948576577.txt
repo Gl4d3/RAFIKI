@@ -1,0 +1,239 @@
+We are revamping the onboarding data pipeline for RAFIKI. We have been testing 
+with real financial data and have identified multiple gaps between what the 
+system currently does and what it needs to do. This prompt describes what we 
+observed, what we expect, and what needs to change. Do not make assumptions — 
+implement exactly what is described.
+
+---
+
+WHAT WE OBSERVED WITH REAL DATA
+
+We uploaded a real I&M Bank statement and real M-Pesa transaction messages. 
+The system showed placeholder data instead of the actual parsed content. 
+This means the parsing pipeline either failed silently or never connected 
+the uploaded file to the display layer. 
+
+The first rule of this revamp: if parsing fails for any reason — LLM 
+unavailable, unrecognised file format, empty result, API error — the system 
+must surface a clear, honest error state. Never show placeholder or sample 
+data when a real file was uploaded. Show the user exactly what failed and 
+give them the option to retry or upload a different file.
+
+---
+
+WHAT REAL BANK STATEMENTS ACTUALLY LOOK LIKE
+
+The I&M Bank statement we tested has this structure:
+- It is a foreign currency account (USD), not a KSh account
+- Transaction narratives contain raw phone numbers in the format 
+  "254XXXXXXXXX/MPESA Payment to 254XXXXXXXXX" — no merchant names
+- Some entries are paybill references like "00204980506150/" with no name
+- There are no labelled categories, no merchant names, no obvious spending 
+  descriptions — just phone numbers and reference codes
+- The balance is in USD
+
+Real M-Pesa SMS messages have this structure:
+- They contain a transaction code, amount in KSh, recipient name (sometimes), 
+  phone number, timestamp, new balance, and transaction cost
+- Income messages say "You have received KshX from [SENDER NAME]"
+- Outgoing messages say "KshX sent to [NAME] [PHONE]" or "KshX sent to 
+  [MERCHANT NAME] for account [ACCOUNT]"
+- The sender name in income messages is often the bank itself 
+  ("IM BANK LIMITED- APP") confirming the bank-to-M-Pesa transfer relationship
+
+This means the two data sources are deeply linked. Bank outflows often 
+appear as M-Pesa income. The system must understand this relationship and 
+not double-count transfers between the user's own accounts.
+
+---
+
+CHANGE 1: MULTI-STATEMENT UPLOAD
+
+Replace the single-file upload with a multi-file upload experience. The user 
+should be able to upload multiple statements in one session — for example, 
+three months of M-Pesa statements plus a bank statement. The UI should show 
+each uploaded file as a card that can be removed. There should be separate 
+upload areas for M-Pesa statements and bank statements since they have 
+different formats and parsing logic.
+
+Accept PDF and CSV for both. M-Pesa CSV exports have a consistent structure. 
+M-Pesa PDF statements have a table format. I&M Bank PDFs have the structure 
+visible in the test statement. The parser must handle all of these.
+
+The more data uploaded, the more accurate the financial model. Make this 
+clear to the user in the UI — "More months = more accurate picture."
+
+---
+
+CHANGE 2: TRANSACTION ANNOTATION BEFORE ANALYSIS
+
+After uploading files but before the silent analysis begins, give the user 
+a short optional step: a free-text comment box where they can tell RAFIKI 
+anything important about their financial situation that the statements won't 
+show. Examples of what users might write:
+
+- "My main income comes from my bank account transferred to M-Pesa"
+- "I pay my housemate rent in cash so it won't appear in the statements"
+- "The number 0728125443 is my mother, I send her money every week"
+- "I freelance on the side and get paid via M-Pesa from various numbers"
+
+This annotation is passed directly to the LLM as high-priority context 
+during the analysis phase. It should influence categorisation decisions. 
+The UI for this step should feel conversational — not a form, but a 
+single large text area with a prompt like "Anything I should know before 
+I start reading your statements? (Optional)"
+
+---
+
+CHANGE 3: THE PARSING PIPELINE
+
+The pipeline has three stages that must happen in sequence:
+
+STAGE A — DETERMINISTIC EXTRACTION (Accountant, no LLM)
+Extract every transaction from every uploaded file into a normalised 
+structure: date, amount, currency, direction (debit/credit), raw narrative 
+text, source file, source format. At this stage, do nothing else. Just 
+extract. If a file cannot be parsed, flag it with the specific error — 
+do not silently skip it.
+
+For M-Pesa SMS messages, also accept pasted text (not just files). Parse 
+each SMS message from the raw text format shown in our examples. Extract: 
+transaction code, amount, direction, counterparty name (if present), 
+counterparty phone number (if present), timestamp, new balance after 
+transaction, transaction cost.
+
+Detect and flag internal transfers: if a credit transaction's narrative 
+contains the user's own bank name (e.g. "IM BANK LIMITED") or if an M-Pesa 
+credit matches the timing and amount of a bank debit, mark both as 
+internal transfers so they are excluded from spending analysis.
+
+STAGE B — LLM ENRICHMENT (RAFIKI + Gemini, with tool calling)
+Pass the extracted transactions plus the user's annotation to Gemini. 
+The LLM's job in this stage is enrichment, not extraction — the numbers 
+are already correct from Stage A.
+
+Give the LLM a set of tools it can call during this stage:
+
+Tool: categorise_transaction
+  Input: transaction_id, proposed_category, confidence, reasoning
+  Purpose: assign a spending category to a transaction. The LLM calls 
+  this for each transaction it can confidently categorise.
+
+Tool: flag_for_gap_filling  
+  Input: transaction_id, question_for_user, context
+  Purpose: mark a transaction as needing user clarification. The LLM calls 
+  this when it cannot confidently categorise a counterparty — particularly 
+  for recurring phone numbers with no name.
+
+Tool: detect_relationship
+  Input: counterparty_identifier, relationship_type, reasoning
+  Purpose: record that a phone number or paybill has a specific relationship 
+  to the user (family, employer, landlord, chama, service provider).
+
+Tool: mark_internal_transfer
+  Input: transaction_id, paired_transaction_id (optional), reasoning
+  Purpose: flag a transaction as a transfer between the user's own accounts.
+
+The LLM should use the user's annotation as primary context. If the user 
+said "0728125443 is my mother", every transaction to that number should be 
+categorised as Social Obligations without needing to ask.
+
+The LLM must handle currency differences. If bank statements are in USD and 
+M-Pesa is in KSh, all amounts should be normalised to KSh for display using 
+a reasonable exchange rate (the rate can be hardcoded for now or fetched 
+from a free API).
+
+STAGE C — ACCOUNTANT AGGREGATION (deterministic, no LLM)
+After Stage B, the Accountant takes the enriched transaction set and 
+produces the category totals, the priority stack suggestion, and the 
+financial health metrics. This is pure Python math. No LLM involved.
+
+---
+
+CHANGE 4: GAP-FILLING WITH REAL UNKNOWNS
+
+The gap-filling conversation must only ask about transactions that were 
+genuinely flagged by the LLM in Stage B using the flag_for_gap_filling 
+tool. It must not ask about transactions that were already categorised.
+
+For phone number transactions (which are the majority in real Kenyan bank 
+statements), the question must include:
+- The raw phone number
+- How many times it appears
+- The total amount sent to this number
+- Any name that appeared in M-Pesa SMS for this number (if available)
+- The frequency pattern (e.g. "every week", "irregular")
+
+The answer options must include categories relevant to Kenyan context:
+Family or relative / Chama or savings group / Business / Domestic worker / 
+Debt repayment / Friend (one-off) / Something else (free text)
+
+---
+
+CHANGE 5: STATUS TRANSPARENCY
+
+During the silent analysis stage, be honest about what is happening. Show 
+distinct status messages for each pipeline stage:
+
+- "Reading your files..." (Stage A extraction in progress)
+- "Identifying your transactions..." (Stage A complete, showing count)
+- "Understanding your spending patterns..." (Stage B LLM enrichment)
+- "Building your financial picture..." (Stage C aggregation)
+
+If the LLM (Gemini) is unavailable or returns an error during Stage B, 
+do not proceed to show results. Show a specific error state: "I wasn't 
+able to analyse your statements right now. The AI service is unavailable. 
+Your files have been saved — tap retry to try again, or continue with 
+basic categorisation only." The "basic categorisation only" path runs 
+Stage A and Stage C without Stage B — using only the deterministic 
+merchant lookup table for categorisation, skipping LLM enrichment.
+
+---
+
+WHAT SHOULD NOT CHANGE
+
+The visual design of the existing screens is working well. Do not change 
+the styling, layout, or design tokens. Only the data pipeline and the 
+content layer change.
+
+The category structure and tier system from the Accountant remains correct:
+  Tier 1 — Survival: Housing, Food & Groceries, Transport, Utilities
+  Tier 2 — Social Obligations: Family, Chama, Domestic support
+  Tier 3 — Growth: Savings, Emergency buffer
+  Tier 4 — Lifestyle: Entertainment, Subscriptions, Dining out
+
+The priority stack shows categories, not individual merchants. That 
+correction from our previous session must be preserved.
+
+---
+
+TEST THIS WITH THE FOLLOWING REAL DATA BEFORE CONSIDERING IT COMPLETE
+
+M-Pesa SMS messages (paste format):
+  "UD9K90H5MP Confirmed. Ksh300.00 sent to ALBERT CHANGWONY 0722754856 
+   on 9/4/26 at 11:21 PM. New M-PESA balance is Ksh994.20. Transaction 
+   cost, Ksh7.00."
+
+  "UD9K90FHBR Confirmed. You have received Ksh2,000.00 from IM BANK 
+   LIMITED- APP on 9/4/26 at 5:14 PM. New M-PESA balance is Ksh2,065.20."
+
+  "UDKK91M7W1 Confirmed. Ksh25.00 sent to SAFARICOM DATA BUNDLES for 
+   account SAFARICOM DATA BUNDLES on 20/4/26 at 1:36 AM. New M-PESA 
+   balance is Ksh969.20. Transaction cost, Ksh0.00."
+
+Bank statement characteristics to handle:
+  - Account in USD, not KSh — normalise to KSh
+  - Transaction narratives are phone numbers, not merchant names
+  - The number 254728125443 appears 6 times — should be flagged for 
+    gap-filling as a recurring unknown contact
+  - The paybill 00204980506150 appears 5 times — should be identified 
+    as a recurring paybill and flagged for gap-filling
+  - Credits from IM BANK LIMITED should be marked as internal transfers
+
+The end result after running the pipeline against this data should show:
+  - The IM BANK credit correctly excluded from spending totals
+  - ALBERT CHANGWONY categorised under Social Obligations
+  - SAFARICOM DATA BUNDLES under Utilities
+  - 254728125443 surfaced in gap-filling as a recurring unknown
+  - 00204980506150 surfaced in gap-filling as an unidentified paybill
+  - All amounts displayed in KSh

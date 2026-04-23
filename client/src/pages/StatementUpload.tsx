@@ -43,10 +43,14 @@ export const StatementUpload = (): JSX.Element => {
       formData.append("userId", currentUser.userId);
       if (isDemo) {
         formData.append("demo", "true");
-      } else if (mpesaFile) {
-        formData.append("mpesa", mpesaFile);
       } else {
-        formData.append("demo", "true");
+        // Honesty rule: never silently substitute demo data.
+        if (!mpesaFile) {
+          throw new Error(
+            "Please attach your M-Pesa statement, or tap 'Try with sample data' below."
+          );
+        }
+        formData.append("mpesa", mpesaFile);
       }
       if (bankFile) {
         formData.append("bank", bankFile);

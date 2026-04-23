@@ -1,0 +1,228 @@
+We are updating the RAFIKI onboarding pipeline based on testing with real 
+financial data. We are describing what the real data looks like, what the 
+system needs to understand about it, and what the pipeline must correctly 
+produce. Build against these specifics, not assumptions.
+
+---
+
+WHAT THE REAL DATA LOOKS LIKE
+
+We have tested with a real I&M Bank KSh current account statement 
+(PAYGO-LCY account type). Here is what the actual data contains and 
+what the parser must correctly handle:
+
+Transaction narratives take these forms in I&M Bank PDFs:
+  - "254728125443/MPESA Payment to 254728125443" — M-Pesa transfer to a 
+    phone number. No name is given in the bank statement.
+  - "CTS/EFT CR BO INDRA LIMITED" — an EFT credit, in this case a salary 
+    deposit from an employer
+  - "01192274659800/Rent Payment" — a paybill payment with a label
+  - "00204980506150/" — a paybill with no label (appears as both 
+    deposits and withdrawals in the same statement)
+  - "CHANDARANA SUPER727393 AIROBI0327" — a card payment at a physical 
+    merchant with location and date codes appended
+  - "MICROSOFT*STORE MSBILL0302 103419PRCR5506" — an international 
+    online subscription with billing reference
+  - "Spotify Stockh0326 023803PRCR5506" — streaming subscription
+  - "Google CLOUD F4QzK3 Dublin0326 114255PRCR5506" — cloud service
+  - "PesaPal*Century Cinema Nairob0326 193419PRCR5506" — PesaPal payment
+  - "Charge 01192274659800/Rent Payment" — bank charge on a transaction
+  - "Excise Duty 01192274659800/Rent Payment" — government excise on a 
+    transaction
+  - "3695448/MPESA Payment to 3695448" — a till number, no merchant name
+
+The parser must handle all of these formats. Bank charges and excise duty 
+entries (rows with "Charge" or "Excise Duty" prefixes referencing another 
+transaction) should be attached to their parent transaction as fees, not 
+treated as independent transactions.
+
+---
+
+A CRITICAL PATTERN: THE SELF-TRANSFER LOOP
+
+The paybill 00204980506150 appears in this statement as both incoming 
+deposits and outgoing withdrawals. This is the user's own M-Pesa number — 
+the user is transferring money between their bank account and their M-Pesa 
+wallet in both directions. These transactions must be identified as internal 
+transfers and excluded from spending analysis. They are not income and not 
+expenses — they are liquidity movements between the user's own accounts.
+
+The system must detect this pattern: a single counterparty identifier that 
+appears on both sides of the ledger within the same statement period is 
+almost certainly an internal transfer and should be flagged as such. The 
+LLM should confirm this during enrichment using the flag_internal_transfer 
+tool before the Accountant excludes it from category totals.
+
+---
+
+WHAT THE ANALYSIS MUST CORRECTLY PRODUCE FROM THIS STATEMENT
+
+Salary detection:
+The credit "CTS/EFT CR BO INDRA LIMITED" for KSh 59,335 on 24 March is 
+the salary. The Accountant must identify EFT credits from consistent 
+employer names as salary events. The employer name should be stored as 
+a known entity.
+
+Rent detection:
+The debit to "01192274659800/Rent Payment" for KSh 18,000 on 25 March 
+(the day after salary) is rent. The narrative explicitly says "Rent 
+Payment". This should be auto-categorised as Housing & Rent, Tier 1, 
+without needing to ask the user.
+
+The large unknown withdrawal:
+KSh 55,000 to paybill 00204980503550 on the same day as salary arrival. 
+This is a large round-number withdrawal that is not a known paybill. 
+It must be surfaced in gap-filling as a high-priority unknown — it is 
+the single largest outflow and its category is unknown. The question 
+to the user should reflect the amount, timing (same day as salary), 
+and that it appears to be a one-time large transfer.
+
+Groceries:
+CHANDARANA appears three times (SUPER, FOODPLUS, NGARA branches) for 
+a combined KSh 5,408. These are all the same supermarket chain and 
+should be aggregated into a single "Food & Groceries" category total. 
+The parser must normalise "CHANDARANA SUPER727393 AIROBI..." to 
+"Chandarana" regardless of branch suffix.
+
+Subscriptions:
+Microsoft Store, Spotify, and Google Cloud should be auto-categorised. 
+Microsoft and Spotify go under Lifestyle / Subscriptions (Tier 4). 
+Google Cloud is ambiguous — could be work-related or personal. It 
+should be flagged for gap-filling.
+
+Entertainment:
+PesaPal*Century Cinema three times on the same evening (26 March) for 
+a combined KSh 1,960. These should be grouped as a single outing under 
+Entertainment (Tier 4), not three separate transactions.
+
+Recurring unknown person:
+Phone number 254728125443 appears approximately 15 times across the 
+month for a combined total over KSh 12,000. This is clearly a recurring 
+person with a significant financial relationship. The gap-filling question 
+for this number must be the first question asked, must show the full 
+frequency and total, and must offer relationship options relevant to 
+Kenyan context: family member, domestic worker, debt repayment, 
+regular business payment, or other.
+
+Secondary recurring person:
+Phone number 254114085820 appears 3 times for a combined KSh 1,800. 
+Also needs gap-filling but lower priority than the above.
+
+---
+
+THE BANK-TO-MPESA RELATIONSHIP
+
+This is a key architectural understanding the system needs: for this 
+user, M-Pesa is not a separate financial system — it is a cash 
+distribution layer fed by the bank account. The bank statement shows 
+money moving to M-Pesa (via the self-transfer paybill), and then 
+M-Pesa statements would show how that cash was actually spent on 
+smaller daily transactions (transport, food stalls, small sends).
+
+The pipeline must be designed to accept both sources together and 
+understand that they represent different layers of the same financial 
+life. When both are uploaded:
+
+- Bank statement provides: salary, rent, subscriptions, supermarket 
+  card purchases, large transfers
+- M-Pesa statement provides: daily transport, small food purchases, 
+  named recipients for person-to-person transfers, airtime, data bundles
+
+The Accountant must merge these into a single transaction set, 
+deduplicate any amounts that appear in both (a bank withdrawal to M-Pesa 
+and an M-Pesa receipt of the same amount on the same day are one event), 
+and produce unified category totals.
+
+---
+
+MULTI-SOURCE UPLOAD REQUIREMENTS
+
+The upload interface must accept:
+- Multiple bank statement PDFs (different months, different accounts)
+- M-Pesa statement PDFs or CSVs
+- Pasted M-Pesa SMS text (for users who have SMS records but no 
+  exported statement)
+- Each uploaded source should be shown as a labelled card the user 
+  can remove before analysis begins
+
+More months of data produces better pattern detection. The UI should 
+communicate this clearly. The minimum useful input is one month of 
+bank statements or M-Pesa activity.
+
+---
+
+USER ANNOTATION STEP
+
+Between upload and analysis, the user should be able to add a short 
+free-text note giving RAFIKI context the statements cannot show. 
+This note must be passed to the LLM as the highest-priority context 
+during enrichment. Examples of what users write:
+  - "The number 0728125443 is my mother"
+  - "I transferred 55,000 to my savings account"
+  - "My salary comes from Indra on the 24th of every month"
+
+If the user explains a transaction in this note, the LLM must use 
+that explanation and must not ask about it again in gap-filling.
+
+---
+
+GAP-FILLING QUESTION QUALITY
+
+Gap-filling questions must be generated by the LLM and must be specific 
+to the actual transaction data. Generic questions are not acceptable.
+
+Good question for 254728125443:
+"I noticed you sent money to the number 0728125443 about 15 times in 
+March, totalling KSh 12,000+. Transfers were spread across the month 
+with no fixed pattern. Who is this person?"
+
+Bad question (do not do this):
+"Who is this contact?"
+
+For the KSh 55,000 withdrawal to an unknown paybill on salary day:
+"On the same day your salary arrived, KSh 55,000 went to paybill 
+00204980503550 — that's most of your salary in a single transfer. 
+Is this a savings account, rent, an investment, or something else?"
+
+---
+
+WHAT SHOULD NOT CHANGE
+
+The existing visual design is correct. The design tokens, screen layouts, 
+and component styles from the current implementation must not be touched. 
+Only the data pipeline and data binding change.
+
+The category and tier structure is correct:
+  Tier 1 — Survival: Housing & Rent, Food & Groceries, Transport, Utilities
+  Tier 2 — Social Obligations: Family, Domestic support, Chama
+  Tier 3 — Growth: Savings, Emergency buffer, Investments
+  Tier 4 — Lifestyle: Entertainment, Subscriptions, Dining out
+
+The priority stack shows categories with aggregated totals, not 
+individual merchants or individual transactions.
+
+---
+
+VALIDATE AGAINST THIS DATA BEFORE CONSIDERING COMPLETE
+
+Run the full pipeline against the March 2026 I&M Bank statement provided. 
+The correct output should be:
+
+Categories identified without asking the user:
+  Housing & Rent: KSh 18,000 (01192274659800 rent payment)
+  Food & Groceries: KSh 5,408 (Chandarana × 3)
+  Entertainment: KSh 1,960 (Century Cinema × 3, same evening)
+  Subscriptions: KSh 679 (Microsoft Store KSh 470 + Spotify KSh 209)
+  Tech/Cloud: KSh 1,374 (Google Cloud — flag for gap-filling)
+
+Items for gap-filling (in priority order):
+  1. KSh 55,000 to 00204980503550 (salary-day large transfer, unknown)
+  2. KSh 12,000+ to 254728125443 across 15 transactions (recurring person)
+  3. KSh 1,800 to 254114085820 across 3 transactions (recurring person)
+  4. Google Cloud KSh 1,374 (personal or work?)
+
+Items correctly excluded as internal transfers:
+  All transactions to/from 00204980506150 (user's own M-Pesa paybill)
+
+Salary correctly identified:
+  KSh 59,335 from INDRA LIMITED on 24 March

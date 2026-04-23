@@ -27,6 +27,8 @@ export const PriorityStackReview = (): JSX.Element => {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [safeBuffer, setSafeBuffer] = useState(2000);
+  const [aiDegraded, setAiDegraded] = useState(false);
+  const [aiDegradedReason, setAiDegradedReason] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -41,6 +43,8 @@ export const PriorityStackReview = (): JSX.Element => {
         setRevealMessage(job.revealMessage || "");
         const stack = (data?.priorityStack || []) as StackItem[];
         setItems(stack);
+        setAiDegraded(!!data?.aiDegraded);
+        setAiDegradedReason(data?.aiDegradedReason || null);
       } catch (err) {
         console.error(err);
       } finally {
@@ -96,6 +100,38 @@ export const PriorityStackReview = (): JSX.Element => {
         <h2 className="text-[#1a1c1c] text-2xl font-medium tracking-[-0.5px] leading-8 mb-6">
           Here's what I found in your money.
         </h2>
+
+        {/* AI-degraded status — design.md: surface-container-high tier, Amber
+            warm warning, no border, ghost-tier nesting, 16px radius for nested */}
+        {aiDegraded && (
+          <div
+            className="rounded-2xl p-5 mb-6 bg-[#e8e8e8]"
+            data-testid="banner-ai-degraded"
+          >
+            <div className="flex items-start gap-3">
+              <div
+                className="w-2 h-2 rounded-full shrink-0 mt-2"
+                style={{ background: "#FFA000" }}
+              />
+              <div className="flex flex-col">
+                <span className="text-[#3f4945] text-[10px] font-medium tracking-[0.5px] uppercase mb-2">
+                  AI insights unavailable
+                </span>
+                <p className="text-[#1a1c1c] text-sm leading-6">
+                  My AI layer is offline right now, so what you see below is the
+                  basic numbers-only view from your statement. The categories
+                  and totals are real — only the conversational insights are
+                  paused.
+                </p>
+                {aiDegradedReason && (
+                  <p className="text-[#3f4945] text-xs leading-5 mt-2">
+                    Reason: {aiDegradedReason}
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {revealMessage && (
           <div
