@@ -2,7 +2,7 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import multer from "multer";
 import { storage } from "./storage";
-import { runAnalysisPipeline } from "./analysis-pipeline";
+import { runAnalysisPipeline, type PipelineSource } from "./analysis-pipeline";
 
 // Strict aggregate caps to keep memory bounded:
 // - per file: 10MB
@@ -128,18 +128,31 @@ export async function registerRoutes(
           onboardingJobId: job.id,
         });
 
-        // For now the pipeline can only consume an M-Pesa CSV. Prefer the
-        // first parseable CSV (regardless of upload order); fall back to the
-        // first file so the pipeline can raise an honest error if there's
-        // nothing it can read. The remaining files, SMS text, and annotation
-        // are persisted on the job for the next task (multi-source parsing).
-        const primary =
-          mpesaFiles.find((f) => f.originalname.toLowerCase().endsWith(".csv")) ||
-          mpesaFiles[0];
-        const fileBuffer = primary?.buffer || Buffer.alloc(0);
-        const fileName = primary?.originalname || null;
+        // Build the pipeline source list. Task #2 adds deterministic M-Pesa
+        // PDF and SMS parsers behind a single dispatcher — so every M-Pesa
+        // file (CSV or PDF) and pasted SMS text can now be handled. Bank
+        // files remain persisted on the job for the next task (bank PDF
+        // parsing + internal-transfer detection) and are not yet fed into
+        // the pipeline.
+        const sources: PipelineSource[] = [];
+        for (const f of mpesaFiles) {
+          sources.push({
+            kind: "auto",
+            buffer: f.buffer,
+            fileName: f.originalname,
+            sourceName: `M-Pesa statement (${f.originalname})`,
+          });
+        }
+        if (smsText) {
+          sources.push({
+            kind: "sms",
+            text: smsText,
+            sourceName: "M-Pesa SMS",
+          });
+        }
 
-        runAnalysisPipeline(job.id, userId, fileBuffer, isDemo, fileName).catch(
+        // Run pipeline in background (don't await)
+        runAnalysisPipeline(job.id, userId, sources, isDemo).catch(
           (err) => console.error("Pipeline error:", err)
         );
 

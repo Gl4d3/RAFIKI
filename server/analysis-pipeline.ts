@@ -2,7 +2,8 @@
 // Orchestrates: parsing → categorisation → entity resolution → AI reveal message
 
 import { storage } from "./storage";
-import { parseMpesaCsv } from "./parser";
+import { parseSource, SourceParseError } from "./parsers";
+import type { ParsedTransaction } from "./parsers/types";
 import {
   categorizeTransactions,
   identifyRecurring,
@@ -17,12 +18,20 @@ import {
   GeminiUnavailableError,
 } from "./gemini";
 
+export interface PipelineSource {
+  // A buffer for a file source (CSV / PDF) OR a text string for pasted SMS.
+  kind: "auto" | "csv" | "pdf" | "sms";
+  buffer?: Buffer;
+  text?: string;
+  fileName?: string | null;
+  sourceName: string;
+}
+
 export async function runAnalysisPipeline(
   jobId: string,
   userId: string,
-  fileBuffer: Buffer,
-  isDemo: boolean = false,
-  fileName: string | null = null
+  sources: PipelineSource[],
+  isDemo: boolean = false
 ): Promise<void> {
   const updateJob = (progress: number, label: string) =>
     storage.updateAnalysisJob(jobId, { progress, progressLabel: label, status: "running" });
@@ -31,21 +40,34 @@ export async function runAnalysisPipeline(
     await updateJob(5, "Reading your statement...");
     await sleep(300);
 
-    let parsed;
+    let parsed: ParsedTransaction[];
     if (isDemo) {
       const { generateDemoTransactions } = await import("./parser");
       parsed = generateDemoTransactions();
-    } else if (fileName && fileName.toLowerCase().endsWith(".csv") && fileBuffer.length > 0) {
-      // Deterministic parse — failures here are HARD errors (we never silently
-      // substitute demo data for a real upload).
-      parsed = parseMpesaCsv(fileBuffer, fileName);
     } else {
-      // We accepted the upload (bank PDF / SMS / M-Pesa PDF) so it's stored
-      // on the job for the next pipeline release, but we can't analyse it
-      // today. Be honest about that — don't pretend we processed something.
-      throw new Error(
-        "I've kept your sources and your note, but I can only analyse M-Pesa CSV exports today. PDF and SMS parsing lands in the next release — please add an M-Pesa CSV, or try the sample data."
-      );
+      // Deterministic parse — failures here are HARD errors tagged with the
+      // specific source name. We never silently substitute demo data for a
+      // real upload.
+      parsed = [];
+      for (const src of sources) {
+        const tx = await parseSource({
+          kind: src.kind,
+          buffer: src.buffer,
+          text: src.text,
+          fileName: src.fileName ?? null,
+          sourceName: src.sourceName,
+        } as any);
+        parsed.push(...tx);
+      }
+      if (parsed.length === 0) {
+        throw new SourceParseError(
+          "statement",
+          "unknown",
+          "no transactions were found across the sources you provided."
+        );
+      }
+      // Sort chronologically so downstream stages see a coherent timeline.
+      parsed.sort((a, b) => a.date.getTime() - b.date.getTime());
     }
 
     await updateJob(20, `Found ${parsed.length} transactions. Identifying patterns...`);
