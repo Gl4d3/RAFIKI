@@ -10,6 +10,7 @@ export interface CategorizedTransaction extends ParsedTransaction {
   tier: string;
   isRecurring: boolean;
   isSalary: boolean;
+  isInternalTransfer: boolean;
 }
 
 export interface EntitySummary {
@@ -78,8 +79,50 @@ export function categorizeTransactions(
       tier: resolved?.tier || "unknown",
       isRecurring: false, // will be set by identifyRecurring
       isSalary: false, // will be set by identifySalary
+      isInternalTransfer: tx.isInternalTransfer ?? false,
     };
   });
+}
+
+// Detect "internal transfers": counterparty identifiers (paybill, phone, or
+// account ref) that appear on BOTH the credit side and the debit side within
+// the same statement window. These are the user moving their own money — they
+// are not real spending or income.
+//
+// We use a tighter key than `normalizeCounterparty` for matching: the raw
+// numeric identifier where present, else the normalised counterparty name.
+export function detectInternalTransfers(
+  transactions: CategorizedTransaction[]
+): CategorizedTransaction[] {
+  const keyOf = (tx: CategorizedTransaction): string => {
+    // Prefer the numeric reference (paybill / phone / account ref) when the
+    // bank parser extracted one — that's the most reliable join key across
+    // sides of the ledger.
+    if (tx.reference && /^\d{4,20}$/.test(tx.reference)) return tx.reference;
+    // Else fall back to a numeric counterparty (M-Pesa phone / paybill).
+    if (/^\d{4,20}$/.test(tx.counterparty)) return tx.counterparty;
+    return normalizeCounterparty(tx.counterparty);
+  };
+
+  const credits = new Set<string>();
+  const debits = new Set<string>();
+  for (const tx of transactions) {
+    const k = keyOf(tx);
+    if (!k) continue;
+    if (tx.direction === "credit") credits.add(k);
+    else debits.add(k);
+  }
+  const both = new Set<string>();
+  credits.forEach((k) => {
+    if (debits.has(k)) both.add(k);
+  });
+
+  if (both.size === 0) return transactions;
+
+  return transactions.map((tx) => ({
+    ...tx,
+    isInternalTransfer: both.has(keyOf(tx)) ? true : tx.isInternalTransfer,
+  }));
 }
 
 // Identify recurring transactions: same counterparty, similar amounts, >2 occurrences
@@ -89,7 +132,7 @@ export function identifyRecurring(
   // Group by normalized counterparty
   const groups: Record<string, CategorizedTransaction[]> = {};
   for (const tx of transactions) {
-    if (tx.direction === "debit") {
+    if (tx.direction === "debit" && !tx.isInternalTransfer) {
       const key = normalizeCounterparty(tx.counterparty);
       if (!groups[key]) groups[key] = [];
       groups[key].push(tx);
@@ -119,11 +162,23 @@ export function identifyRecurring(
   }));
 }
 
-// Identify salary: largest single credit, most regular timing
+// Heuristic: does this credit look like a payroll EFT line?
+// Real Kenyan bank statements label salary credits with EFT/CTS/RTGS prefixes
+// and a clear employer name (e.g. "CTS/EFT CR BO INDRA LIMITED").
+function looksLikeEftSalary(tx: CategorizedTransaction): boolean {
+  const text = `${tx.rawText || ""} ${tx.counterparty || ""}`;
+  return /\b(EFT|CTS|RTGS)\b/i.test(text) && /\b(CR|BO|PAYROLL|SAL)\b/i.test(text);
+}
+
+// Identify salary: largest single credit, most regular timing.
+// EXCLUDES internal transfers — moving money from your own M-Pesa to your
+// own bank is not income.
 export function identifySalary(
   transactions: CategorizedTransaction[]
 ): CategorizedTransaction[] {
-  const credits = transactions.filter((t) => t.direction === "credit");
+  const credits = transactions.filter(
+    (t) => t.direction === "credit" && !t.isInternalTransfer
+  );
   if (credits.length === 0) return transactions;
 
   // Group credits by counterparty
@@ -134,22 +189,31 @@ export function identifySalary(
     creditGroups[key].push(tx);
   }
 
-  // Score each group: recurring monthly large credits = likely salary
-  let bestKey = "";
-  let bestScore = -1;
-
+  // Pass 1 — explicit EFT/CTS/RTGS payroll lines beat everything else, even
+  // with a single occurrence in a one-month statement.
+  const eftKeys = new Set<string>();
   for (const [key, txs] of Object.entries(creditGroups)) {
-    const amounts = txs.map((t) => t.amount);
-    const maxAmount = Math.max(...amounts);
-    const avgAmount = amounts.reduce((a, b) => a + b, 0) / amounts.length;
-    const score = avgAmount * txs.length; // prefer larger amounts with more occurrences
-    if (score > bestScore) {
-      bestScore = score;
-      bestKey = key;
-    }
+    if (txs.some(looksLikeEftSalary)) eftKeys.add(key);
   }
 
-  const salaryKeys = new Set<string>([bestKey]);
+  let salaryKeys: Set<string>;
+  if (eftKeys.size > 0) {
+    salaryKeys = eftKeys;
+  } else {
+    // Pass 2 — fall back to "largest recurring credit" scoring.
+    let bestKey = "";
+    let bestScore = -1;
+    for (const [key, txs] of Object.entries(creditGroups)) {
+      const amounts = txs.map((t) => t.amount);
+      const avgAmount = amounts.reduce((a, b) => a + b, 0) / amounts.length;
+      const score = avgAmount * txs.length;
+      if (score > bestScore) {
+        bestScore = score;
+        bestKey = key;
+      }
+    }
+    salaryKeys = new Set<string>([bestKey]);
+  }
 
   return transactions.map((tx) => ({
     ...tx,
@@ -190,7 +254,7 @@ export function buildEntitySummaries(
   const groups: Record<string, CategorizedTransaction[]> = {};
 
   for (const tx of transactions) {
-    if (tx.direction === "debit") {
+    if (tx.direction === "debit" && !tx.isInternalTransfer) {
       const key = normalizeCounterparty(tx.counterparty);
       if (!groups[key]) groups[key] = [];
       groups[key].push(tx);
@@ -246,8 +310,11 @@ export function buildEntitySummaries(
 export function computeFinancialSummary(
   transactions: CategorizedTransaction[]
 ): FinancialSummary {
-  const debits = transactions.filter((t) => t.direction === "debit");
-  const credits = transactions.filter((t) => t.direction === "credit");
+  // Internal transfers are evidence, not real spending or income — exclude
+  // them from every aggregate but keep the underlying rows around.
+  const realTxs = transactions.filter((t) => !t.isInternalTransfer);
+  const debits = realTxs.filter((t) => t.direction === "debit");
+  const credits = realTxs.filter((t) => t.direction === "credit");
 
   const totalDebits = debits.reduce((sum, t) => sum + t.amount, 0);
   const totalCredits = credits.reduce((sum, t) => sum + t.amount, 0);

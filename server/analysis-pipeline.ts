@@ -6,6 +6,7 @@ import { parseSource, SourceParseError } from "./parsers";
 import type { ParsedTransaction } from "./parsers/types";
 import {
   categorizeTransactions,
+  detectInternalTransfers,
   identifyRecurring,
   identifySalary,
   computeFinancialSummary,
@@ -20,7 +21,9 @@ import {
 
 export interface PipelineSource {
   // A buffer for a file source (CSV / PDF) OR a text string for pasted SMS.
-  kind: "auto" | "csv" | "pdf" | "sms";
+  // `auto` / `csv` / `pdf` / `sms` are M-Pesa channels; `bank` is a bank
+  // statement PDF (e.g. I&M Bank) routed to the bank-PDF parser.
+  kind: "auto" | "csv" | "pdf" | "sms" | "bank";
   buffer?: Buffer;
   text?: string;
   fileName?: string | null;
@@ -47,7 +50,9 @@ export async function runAnalysisPipeline(
     } else {
       // Deterministic parse — failures here are HARD errors tagged with the
       // specific source name. We never silently substitute demo data for a
-      // real upload.
+      // real upload. The dispatcher routes M-Pesa CSV/PDF/SMS and I&M Bank
+      // PDFs to the appropriate parser and tags every transaction with its
+      // channel so the Accountant can reason about cross-source patterns.
       parsed = [];
       for (const src of sources) {
         const tx = await parseSource({
@@ -77,6 +82,10 @@ export async function runAnalysisPipeline(
     let categorized = categorizeTransactions(parsed);
     await updateJob(35, "Categorising transactions...");
     await sleep(300);
+
+    categorized = detectInternalTransfers(categorized);
+    await updateJob(45, "Spotting internal transfers...");
+    await sleep(150);
 
     categorized = identifyRecurring(categorized);
     await updateJob(50, "Finding recurring obligations...");
@@ -113,7 +122,11 @@ export async function runAnalysisPipeline(
         tier: tx.tier as any,
         isRecurring: tx.isRecurring,
         isSalary: tx.isSalary,
-        rawText: tx.rawText,
+        // Tag internal transfers in rawText so the row remains in the
+        // evidence table without polluting downstream aggregations.
+        rawText: tx.isInternalTransfer
+          ? `[INTERNAL_TRANSFER] ${tx.rawText}`
+          : tx.rawText,
       }))
     );
 

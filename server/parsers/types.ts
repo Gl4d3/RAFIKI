@@ -3,7 +3,7 @@
 // regardless of whether the source was CSV, PDF, or pasted SMS text.
 
 export type TransactionDirection = "credit" | "debit";
-export type ParserSourceKind = "csv" | "pdf" | "sms";
+export type ParserSourceKind = "csv" | "pdf" | "sms" | "bank-pdf";
 
 export interface ParsedTransaction {
   date: Date;
@@ -17,6 +17,12 @@ export interface ParsedTransaction {
   currency: string;
   rawText: string;
   sourceType?: ParserSourceKind;
+  // Bank-statement extras (set by the bank-PDF parser only).
+  fees?: { charge: number; excise: number };
+  // Filled in by the Accountant after cross-source analysis.
+  isInternalTransfer?: boolean;
+  // Channel — distinguishes M-Pesa entries from bank entries downstream.
+  source?: "mpesa" | "bank";
 }
 
 // Input accepted by the source dispatcher.
@@ -43,6 +49,15 @@ export type ParseSourceInput =
       kind: "auto";
       buffer?: Buffer;
       text?: string;
+      fileName?: string | null;
+      sourceName?: string;
+    }
+  | {
+      // Bank statement PDF (e.g. I&M Bank). Routed to the bank-PDF parser
+      // and tagged with `source: "bank"` so downstream stages can
+      // distinguish bank entries from M-Pesa entries.
+      kind: "bank";
+      buffer: Buffer;
       fileName?: string | null;
       sourceName?: string;
     };

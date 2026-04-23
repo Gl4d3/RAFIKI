@@ -128,12 +128,10 @@ export async function registerRoutes(
           onboardingJobId: job.id,
         });
 
-        // Build the pipeline source list. Task #2 adds deterministic M-Pesa
-        // PDF and SMS parsers behind a single dispatcher — so every M-Pesa
-        // file (CSV or PDF) and pasted SMS text can now be handled. Bank
-        // files remain persisted on the job for the next task (bank PDF
-        // parsing + internal-transfer detection) and are not yet fed into
-        // the pipeline.
+        // Build the pipeline source list. The dispatcher routes every
+        // M-Pesa file (CSV or PDF) and pasted SMS text to the right parser,
+        // and bank PDFs go through the I&M Bank parser. Failures are HARD
+        // errors — we never silently substitute demo data for a real upload.
         const sources: PipelineSource[] = [];
         for (const f of mpesaFiles) {
           sources.push({
@@ -141,6 +139,14 @@ export async function registerRoutes(
             buffer: f.buffer,
             fileName: f.originalname,
             sourceName: `M-Pesa statement (${f.originalname})`,
+          });
+        }
+        for (const f of bankFiles) {
+          sources.push({
+            kind: "bank",
+            buffer: f.buffer,
+            fileName: f.originalname,
+            sourceName: `Bank statement (${f.originalname})`,
           });
         }
         if (smsText) {

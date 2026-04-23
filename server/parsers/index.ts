@@ -4,8 +4,32 @@
 import { parseMpesaCsv } from "./mpesa-csv";
 import { parseMpesaPdf } from "./mpesa-pdf";
 import { parseMpesaSms } from "./mpesa-sms";
+import { parseBankPdf } from "../bank-pdf-parser";
 import type { ParseSourceInput, ParsedTransaction } from "./types";
 import { SourceParseError } from "./types";
+
+function tagMpesa(txs: ParsedTransaction[]): ParsedTransaction[] {
+  return txs.map((t) => ({ ...t, source: "mpesa" as const }));
+}
+
+async function runBankPdf(
+  buffer: Buffer,
+  sourceName: string
+): Promise<ParsedTransaction[]> {
+  try {
+    const txs = await parseBankPdf(buffer);
+    // Bank parser returns the legacy ParsedTransaction shape; coerce
+    // missing optional fields and tag the channel.
+    return txs.map((t: any) => ({
+      currency: "KES",
+      ...t,
+      source: "bank" as const,
+      sourceType: "bank-pdf" as const,
+    })) as ParsedTransaction[];
+  } catch (err: any) {
+    throw new SourceParseError(sourceName, "pdf", err?.message ?? String(err));
+  }
+}
 
 export { SourceParseError } from "./types";
 export type { ParsedTransaction, ParseSourceInput } from "./types";
@@ -26,23 +50,26 @@ export async function parseSource(
   const sourceName = input.sourceName || defaultSourceName(input);
 
   if (input.kind === "csv") {
-    return parseMpesaCsv(input.buffer, sourceName);
+    return tagMpesa(parseMpesaCsv(input.buffer, sourceName));
   }
   if (input.kind === "pdf") {
-    return parseMpesaPdf(input.buffer, sourceName);
+    return tagMpesa(await parseMpesaPdf(input.buffer, sourceName));
   }
   if (input.kind === "sms") {
-    return parseMpesaSms(input.text, sourceName);
+    return tagMpesa(parseMpesaSms(input.text, sourceName));
+  }
+  if (input.kind === "bank") {
+    return runBankPdf(input.buffer, sourceName);
   }
 
-  // Auto-detect.
+  // Auto-detect (M-Pesa only — bank statements must be uploaded with kind:"bank").
   if (input.buffer && input.buffer.length > 0) {
     const fname = (input.fileName || "").toLowerCase();
     if (looksLikePdf(input.buffer) || fname.endsWith(".pdf")) {
-      return parseMpesaPdf(input.buffer, sourceName);
+      return tagMpesa(await parseMpesaPdf(input.buffer, sourceName));
     }
     if (looksLikeCsv(input.buffer) || fname.endsWith(".csv")) {
-      return parseMpesaCsv(input.buffer, sourceName);
+      return tagMpesa(parseMpesaCsv(input.buffer, sourceName));
     }
     throw new SourceParseError(
       sourceName,
@@ -52,7 +79,7 @@ export async function parseSource(
   }
 
   if (input.text && input.text.trim()) {
-    return parseMpesaSms(input.text, sourceName);
+    return tagMpesa(parseMpesaSms(input.text, sourceName));
   }
 
   throw new SourceParseError(
