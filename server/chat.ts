@@ -6,6 +6,7 @@ import {
   GoogleGenerativeAI,
   SchemaType,
   type FunctionDeclaration,
+  type FunctionResponsePart,
   type Tool,
   type Content,
   type Part,
@@ -17,6 +18,8 @@ import {
   simulateAction,
   computeHealthScore,
   runPriorityCascade,
+  type SimulationResult,
+  type CascadeAllocation,
 } from "./accountant-live";
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
@@ -25,6 +28,14 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
 function sseWrite(res: Response, event: Record<string, unknown>) {
   res.write(`data: ${JSON.stringify(event)}\n\n`);
+}
+
+// ─── Typed tool call log entry ────────────────────────────────────────────────
+
+interface ToolCallRecord {
+  name: string;
+  args: Record<string, unknown>;
+  result: ToolResult;
 }
 
 // ─── System prompt ────────────────────────────────────────────────────────────
@@ -143,16 +154,15 @@ const chatTools: Tool[] = [
 
 // ─── Tool execution ───────────────────────────────────────────────────────────
 
-interface ToolContext {
-  userId: string;
-  emitProposal?: (amount: number, recipient: string) => void;
-  emitCascade?: (allocation: unknown[]) => void;
-}
-
 interface ToolResult {
   ok: boolean;
   data?: unknown;
   error?: string;
+}
+
+interface ToolContext {
+  userId: string;
+  emitCascade: (allocation: CascadeAllocation[]) => void;
 }
 
 async function executeTool(
@@ -179,9 +189,8 @@ async function executeTool(
       const category = String(args.category || "general");
       if (!amount || amount <= 0) return { ok: false, error: "amount must be positive" };
 
-      const result = simulateAction(amount, category, state, stack);
+      const result: SimulationResult = simulateAction(amount, category, state, stack);
 
-      // Log Red Alert if buffer breached
       if (result.bufferBreached) {
         await storage.createActivityEvent({
           userId: ctx.userId,
@@ -206,13 +215,8 @@ async function executeTool(
         return { ok: false, error: "incomeAmount must be positive" };
 
       const result = runPriorityCascade(incomeAmount, stack);
+      ctx.emitCascade(result.waterfall);
 
-      // Emit cascade event to client
-      if (ctx.emitCascade) {
-        ctx.emitCascade(result.waterfall);
-      }
-
-      // Log salary event
       await storage.createActivityEvent({
         userId: ctx.userId,
         kind: "salary",
@@ -224,18 +228,17 @@ async function executeTool(
     }
 
     return { ok: false, error: `Unknown tool: ${name}` };
-  } catch (err: any) {
-    return { ok: false, error: err?.message || "Tool execution failed" };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "Tool execution failed";
+    return { ok: false, error: msg };
   }
 }
 
 // ─── Intent detection ─────────────────────────────────────────────────────────
 
-// Detect transfer intent in the user's message to generate proposal events.
 function detectTransferIntent(
   message: string
 ): { amount: number; recipient: string } | null {
-  // "send mum 2000" / "send 2000 to mum" / "pay John 5000"
   const patterns = [
     /(?:send|pay|transfer)\s+([a-z][a-z\s]+?)\s+(?:ksh\s*)?(\d[\d,]+)/i,
     /(?:send|pay|transfer)\s+(?:ksh\s*)?(\d[\d,]+)\s+(?:to\s+)?([a-z][a-z\s]+)/i,
@@ -245,8 +248,9 @@ function detectTransferIntent(
     const m = message.match(pat);
     if (m) {
       const [, a, b] = m;
-      const numStr = /\d[\d,]+/.exec(a) ? a : b;
-      const nameStr = /\d[\d,]+/.exec(a) ? b : a;
+      const isANumeric = /\d[\d,]+/.test(a);
+      const numStr = isANumeric ? a : b;
+      const nameStr = isANumeric ? b : a;
       const amount = parseInt(numStr.replace(/,/g, ""), 10);
       const recipient = nameStr.trim();
       if (amount > 0 && recipient.length > 0) {
@@ -257,7 +261,7 @@ function detectTransferIntent(
   return null;
 }
 
-// ─── Model selection with fallback ────────────────────────────────────────────
+// ─── Model selection ──────────────────────────────────────────────────────────
 
 const CHAT_MODEL_CHAIN = ["gemini-2.5-flash", "gemini-2.5-pro"];
 
@@ -269,39 +273,54 @@ export interface ChatRequest {
   conversationId?: string;
 }
 
-/**
- * Handle a chat message with Gemini streaming + tool calling.
- * Writes SSE events to res. Caller must NOT set res headers before calling.
- */
 export async function streamChat(
   req: ChatRequest,
   res: Response
 ): Promise<void> {
   const { userId, message } = req;
 
-  // Set SSE headers
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders();
 
-  // Ensure conversation exists
-  const conv = await storage.getOrCreateConversation(userId);
-  const conversationId = conv.id;
+  // Resolve conversation — honor the supplied ID if it belongs to this user.
+  let conversationId: string;
+  try {
+    if (req.conversationId) {
+      const existing = await storage.getConversation(req.conversationId);
+      if (!existing || existing.userId !== userId) {
+        sseWrite(res, {
+          type: "error",
+          message: "Conversation not found or access denied.",
+        });
+        sseWrite(res, { type: "done", conversationId: req.conversationId });
+        res.end();
+        return;
+      }
+      conversationId = existing.id;
+    } else {
+      const conv = await storage.getOrCreateConversation(userId);
+      conversationId = conv.id;
+    }
+  } catch (err: unknown) {
+    sseWrite(res, { type: "error", message: "Failed to load conversation." });
+    sseWrite(res, { type: "done", conversationId: req.conversationId ?? "" });
+    res.end();
+    return;
+  }
 
-  // Load conversation history for context (last 20 messages)
   const prevMessages = await storage.getMessages(conversationId);
   const history: Content[] = prevMessages.slice(-20).map((m) => ({
     role: m.role === "user" ? "user" : "model",
     parts: [{ text: m.content }],
   }));
 
-  // Build system prompt with fresh financial context
   let systemPrompt: string;
   try {
     systemPrompt = await buildSystemPrompt(userId);
-  } catch (err: any) {
+  } catch (err: unknown) {
     sseWrite(res, {
       type: "error",
       message: "Could not load your financial data. Please try again.",
@@ -311,36 +330,29 @@ export async function streamChat(
     return;
   }
 
-  // Detect transfer intent for potential proposal event
   const transferIntent = detectTransferIntent(message);
 
-  // Tool emission callbacks
   let cascadeEmitted = false;
-  const emitCascade = (allocation: unknown[]) => {
+  const emitCascade = (allocation: CascadeAllocation[]) => {
     if (!cascadeEmitted) {
       sseWrite(res, { type: "cascade", allocation });
       cascadeEmitted = true;
     }
   };
 
-  const toolCtx: ToolContext = {
-    userId,
-    emitCascade,
-  };
+  const toolCtx: ToolContext = { userId, emitCascade };
 
-  // Collect assistant response parts for persistence
-  const toolCallLog: Array<{ name: string; args: unknown; result: unknown }> = [];
+  const toolCallLog: ToolCallRecord[] = [];
   let fullAssistantText = "";
   let proposalEmitted = false;
+  let streamError: Error | null = null;
 
-  // Streaming loop with tool calling
   try {
-    let modelName = CHAT_MODEL_CHAIN[0];
-    let lastErr: any = null;
+    let lastTransientErr: Error | null = null;
+    let succeeded = false;
 
-    for (const candidateModel of CHAT_MODEL_CHAIN) {
+    for (const modelName of CHAT_MODEL_CHAIN) {
       try {
-        modelName = candidateModel;
         const model = genAI.getGenerativeModel({
           model: modelName,
           tools: chatTools,
@@ -349,97 +361,115 @@ export async function streamChat(
         });
 
         const chat = model.startChat({ history });
-
-        // Track current message parts for the tool calling loop
         let currentParts: Part[] = [{ text: message }];
         const MAX_TOOL_ROUNDS = 6;
 
         for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
           const stream = await chat.sendMessageStream(currentParts);
-          
-          // Collect text chunks and function calls from this round
-          let roundText = "";
-          const roundFunctionCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
+
+          const roundFunctionCalls: Array<{
+            name: string;
+            args: Record<string, unknown>;
+          }> = [];
 
           for await (const chunk of stream.stream) {
-            const parts = chunk.candidates?.[0]?.content?.parts || [];
+            const parts = chunk.candidates?.[0]?.content?.parts ?? [];
             for (const part of parts) {
               if ("text" in part && part.text) {
-                roundText += part.text;
                 fullAssistantText += part.text;
                 sseWrite(res, { type: "token", text: part.text });
               } else if ("functionCall" in part && part.functionCall) {
                 roundFunctionCalls.push({
                   name: part.functionCall.name,
-                  args: (part.functionCall.args || {}) as Record<string, unknown>,
+                  args: (part.functionCall.args ?? {}) as Record<string, unknown>,
                 });
               }
             }
           }
 
-          // No function calls → streaming complete
           if (roundFunctionCalls.length === 0) break;
 
-          // Execute all tool calls in this round
-          const toolResponseParts: Part[] = [];
+          const responseParts: FunctionResponsePart[] = [];
+
           for (const fc of roundFunctionCalls) {
             const result = await executeTool(fc.name, fc.args, toolCtx);
             toolCallLog.push({ name: fc.name, args: fc.args, result });
 
-            // Emit proposal event when simulate_action says it's safe AND we detected transfer intent
+            // Emit proposal SSE + activity event when simulate_action is safe
+            // and the user expressed a transfer intent.
             if (
               fc.name === "simulate_action" &&
               !proposalEmitted &&
-              transferIntent &&
-              (result.data as any)?.safe === true
+              transferIntent !== null
             ) {
-              sseWrite(res, {
-                type: "proposal",
-                amount: transferIntent.amount,
-                recipient: transferIntent.recipient,
-              });
-              proposalEmitted = true;
+              const sim = result.data as SimulationResult | undefined;
+              if (sim?.safe === true) {
+                sseWrite(res, {
+                  type: "proposal",
+                  amount: transferIntent.amount,
+                  recipient: transferIntent.recipient,
+                });
+                proposalEmitted = true;
+
+                await storage.createActivityEvent({
+                  userId,
+                  kind: "transfer",
+                  description: `Transfer of KSh ${transferIntent.amount.toLocaleString()} to ${transferIntent.recipient} proposed by RAFIKI.`,
+                  amount: transferIntent.amount,
+                });
+              }
             }
 
-            toolResponseParts.push({
+            responseParts.push({
               functionResponse: {
                 name: fc.name,
-                response: { result: JSON.stringify(result.data || result) },
+                response: { result: JSON.stringify(result.data ?? result) },
               },
-            } as unknown as Part);
+            });
           }
 
-          // Send tool results back for the next streaming turn
-          currentParts = toolResponseParts;
+          currentParts = responseParts;
         }
 
-        // Successfully completed — break model fallback loop
+        succeeded = true;
         break;
-      } catch (err: any) {
-        lastErr = err;
-        const status = err?.status ?? err?.response?.status;
-        const msg = String(err?.message || "").toLowerCase();
+      } catch (err: unknown) {
+        const e = err instanceof Error ? err : new Error(String(err));
+        const anyErr = err as { status?: number; response?: { status?: number } };
+        const status = anyErr?.status ?? anyErr?.response?.status;
+        const msg = e.message.toLowerCase();
         const isQuota = status === 429 || msg.includes("quota") || msg.includes("billing");
         const isTransient = status === 503 || status === 500 || msg.includes("overloaded");
 
         if (isQuota) {
-          // Same key — no point trying other models
-          throw err;
+          streamError = e;
+          break;
         }
-        if (!isTransient) {
-          throw err;
+        if (isTransient) {
+          lastTransientErr = e;
+          console.warn(`Chat model "${modelName}" busy — trying next.`);
+          continue;
         }
-        console.warn(`Chat model "${modelName}" busy. Trying next...`);
+        streamError = e;
+        break;
       }
     }
-  } catch (err: any) {
-    console.error("Chat stream error:", err);
+
+    // If all models failed transiently, propagate the last error.
+    if (!succeeded && streamError === null && lastTransientErr !== null) {
+      throw lastTransientErr;
+    }
+    if (!succeeded && streamError !== null) {
+      throw streamError;
+    }
+  } catch (err: unknown) {
+    const e = err instanceof Error ? err : new Error(String(err));
+    console.error("Chat stream error:", e.message);
     const isQuota =
-      err?.status === 429 ||
-      String(err?.message || "").toLowerCase().includes("quota");
+      e.message.toLowerCase().includes("quota") ||
+      e.message.toLowerCase().includes("billing");
 
     if (!fullAssistantText) {
-      // Nothing was streamed yet — emit an error message in RAFIKI voice
       const errorMsg = isQuota
         ? "I'm not able to respond right now — my AI service has reached its limit. Please try again in a few minutes."
         : "Something went wrong on my end. Give it a moment and try again.";
@@ -448,9 +478,8 @@ export async function streamChat(
     }
   }
 
-  // Persist the conversation messages
+  // Persist conversation messages.
   try {
-    // Save user message
     await storage.createMessage({
       conversationId,
       role: "user",
@@ -458,20 +487,19 @@ export async function streamChat(
       toolCallsJson: null,
     });
 
-    // Save assistant message (with tool call log if any)
     if (fullAssistantText.trim()) {
       await storage.createMessage({
         conversationId,
         role: "assistant",
         content: fullAssistantText.trim(),
-        toolCallsJson: toolCallLog.length > 0 ? (toolCallLog as any) : null,
+        toolCallsJson: toolCallLog.length > 0 ? toolCallLog : null,
       });
     }
 
-    // Update conversation updatedAt
     await storage.updateConversation(conversationId);
-  } catch (err) {
-    console.error("Failed to persist chat messages:", err);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "unknown error";
+    console.error("Failed to persist chat messages:", msg);
   }
 
   sseWrite(res, { type: "done", conversationId });
