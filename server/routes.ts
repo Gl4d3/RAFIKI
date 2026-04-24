@@ -867,7 +867,19 @@ export async function registerRoutes(
     }
   });
 
-  // ── Emergency brake ───────────────────────────────────────────────────────
+  // ── Emergency brake: read ────────────────────────────────────────────────
+  app.get("/api/user/:id/brake", async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params as Record<string, string>;
+      const user = await storage.getUser(id);
+      if (!user) return res.status(404).json({ error: "User not found" });
+      res.json({ emergencyBrakeActive: user.emergencyBrakeActive ?? false });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Emergency brake: write ───────────────────────────────────────────────
   app.patch("/api/user/:id/brake", async (req: Request, res: Response) => {
     try {
       const { id } = req.params as Record<string, string>;

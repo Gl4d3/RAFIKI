@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { useLocation } from "wouter";
 import { AppLayout } from "@/components/AppLayout";
 import { useRafiki } from "@/lib/rafiki-context";
 
@@ -24,6 +23,15 @@ interface CascadeData {
   income?: number;
 }
 
+interface RedAlertFields {
+  shortfall?: string;
+  obligation?: string;
+  daysUntilDue?: string;
+  harvest?: string;
+  harvestSource?: string;
+  rawText: string;
+}
+
 type ThreadMessage = {
   id: string;
   role: "user" | "assistant";
@@ -32,8 +40,8 @@ type ThreadMessage = {
   kind: "text" | "proposal" | "cascade";
   proposal?: ProposalData;
   cascade?: CascadeData;
-  proposalState?: "pending" | "sent" | "changed";
-  redAlert?: boolean;
+  proposalState?: "pending" | "sent" | "error";
+  redAlert?: RedAlertFields;
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -42,12 +50,37 @@ function uid(): string {
   return Math.random().toString(36).slice(2);
 }
 
-function isRedAlert(text: string): boolean {
-  return (
-    text.includes("more than your float allows") ||
-    text.includes("would breach") ||
-    text.includes("at risk") && text.includes("float")
-  );
+function parseRedAlert(text: string): RedAlertFields | null {
+  if (
+    !text.includes("more than your float allows") &&
+    !(text.includes("at risk") && text.includes("float"))
+  ) {
+    return null;
+  }
+
+  const fields: RedAlertFields = { rawText: text };
+
+  // "KSh X is Y more than your float allows"
+  const shortfallMatch = text.match(/KSh\s+([\d,]+)\s+is\s+([\d,]+)\s+more than your float/);
+  if (shortfallMatch) {
+    fields.shortfall = shortfallMatch[1];
+  }
+
+  // "put your [obligation] at risk — that obligation is due in X days"
+  const obligationMatch = text.match(/put your (.+?) at risk.*?due in (\d+) days?/i);
+  if (obligationMatch) {
+    fields.obligation = obligationMatch[1].trim();
+    fields.daysUntilDue = obligationMatch[2];
+  }
+
+  // "defer KSh X from [source] — that would cover the gap"
+  const harvestMatch = text.match(/defer KSh\s+([\d,]+)\s+from\s+(.+?)\s+(?:—|–|-|\.)/);
+  if (harvestMatch) {
+    fields.harvest = harvestMatch[1];
+    fields.harvestSource = harvestMatch[2].trim();
+  }
+
+  return fields;
 }
 
 const tierColor: Record<string, string> = {
@@ -64,11 +97,13 @@ function ProposalCard({
   userId,
   onChangeAmount,
   onSent,
+  onError,
 }: {
   msg: ThreadMessage;
   userId: string;
   onChangeAmount: () => void;
   onSent: (msgId: string) => void;
+  onError: (msgId: string) => void;
 }) {
   const [loading, setLoading] = useState(false);
   const { proposal, proposalState, id } = msg;
@@ -77,15 +112,18 @@ function ProposalCard({
   const handleSend = async () => {
     setLoading(true);
     try {
-      await fetch(`/api/user/${userId}/transfer-confirm`, {
+      const res = await fetch(`/api/user/${userId}/transfer-confirm`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ amount: proposal.amount, recipient: proposal.recipient }),
       });
-      onSent(id);
+      if (res.ok) {
+        onSent(id);
+      } else {
+        onError(id);
+      }
     } catch {
-      // silent — UI still marks sent
-      onSent(id);
+      onError(id);
     } finally {
       setLoading(false);
     }
@@ -112,6 +150,25 @@ function ProposalCard({
     );
   }
 
+  if (proposalState === "error") {
+    return (
+      <div
+        data-testid={`card-proposal-error-${id}`}
+        style={{
+          background: "rgba(192,57,43,0.06)",
+          borderRadius: 16,
+          padding: "14px 16px",
+          marginTop: 10,
+        }}
+      >
+        <p style={{ fontSize: 12, fontWeight: 500, color: "#c0392b" }}>Transfer failed</p>
+        <p style={{ fontSize: 13, color: "#3f4945", marginTop: 2 }}>
+          Could not queue KSh {proposal.amount.toLocaleString()} to {proposal.recipient}. Please try again.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div
       data-testid={`card-proposal-${id}`}
@@ -133,14 +190,7 @@ function ProposalCard({
         to {proposal.recipient}
       </p>
       {proposal.context && (
-        <div
-          style={{
-            background: "#f3f3f3",
-            borderRadius: 10,
-            padding: "8px 12px",
-            marginBottom: 14,
-          }}
-        >
+        <div style={{ background: "#f3f3f3", borderRadius: 10, padding: "8px 12px", marginBottom: 14 }}>
           <p style={{ fontSize: 12, color: "#3f4945", lineHeight: 1.5 }}>{proposal.context}</p>
         </div>
       )}
@@ -189,8 +239,7 @@ function CascadeCard({ msg, onConfirm }: { msg: ThreadMessage; onConfirm: (id: s
   const { cascade, id, proposalState } = msg;
   if (!cascade) return null;
 
-  const total = cascade.waterfall.reduce((s, a) => s + a.amount, 0) + (cascade.leftover ?? 0);
-  const income = cascade.income ?? total;
+  const income = cascade.income ?? cascade.waterfall.reduce((s, a) => s + a.amount, 0) + (cascade.leftover ?? 0);
 
   if (proposalState === "sent") {
     return (
@@ -277,17 +326,55 @@ function CascadeCard({ msg, onConfirm }: { msg: ThreadMessage; onConfirm: (id: s
   );
 }
 
-function RedAlertInset({ text }: { text: string }) {
+function RedAlertInset({ fields }: { fields: RedAlertFields }) {
   return (
     <div
+      data-testid="card-red-alert"
       style={{
         background: "#e8e8e8",
-        borderRadius: 12,
-        padding: "12px 14px",
-        marginTop: 8,
+        borderRadius: 14,
+        padding: "14px 16px",
+        marginTop: 4,
       }}
     >
-      <p style={{ fontSize: 13, color: "#1a1c1c", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{text}</p>
+      {fields.shortfall && (
+        <div style={{ marginBottom: 10 }}>
+          <p style={{ fontSize: 10, fontWeight: 500, color: "#3f4945", letterSpacing: "0.05em", textTransform: "uppercase", marginBottom: 4 }}>
+            Shortfall
+          </p>
+          <p style={{ fontSize: 20, fontWeight: 500, color: "#1a1c1c", letterSpacing: "-0.02em" }}>
+            KSh {fields.shortfall}
+          </p>
+        </div>
+      )}
+      {fields.obligation && (
+        <div style={{ marginBottom: 6 }}>
+          <p style={{ fontSize: 10, fontWeight: 500, color: "#3f4945", letterSpacing: "0.05em", textTransform: "uppercase", marginBottom: 2 }}>
+            Obligation at risk
+          </p>
+          <p style={{ fontSize: 13, fontWeight: 500, color: "#1a1c1c" }}>{fields.obligation}</p>
+          {fields.daysUntilDue && (
+            <p style={{ fontSize: 12, color: "#3f4945", marginTop: 2 }}>
+              Due in {fields.daysUntilDue} {parseInt(fields.daysUntilDue) === 1 ? "day" : "days"}
+            </p>
+          )}
+        </div>
+      )}
+      {fields.harvest && (
+        <div style={{ marginTop: 10, paddingTop: 10, borderTop: "none" }}>
+          <p style={{ fontSize: 10, fontWeight: 500, color: "#3f4945", letterSpacing: "0.05em", textTransform: "uppercase", marginBottom: 4 }}>
+            One option
+          </p>
+          <p style={{ fontSize: 13, color: "#1a1c1c" }}>
+            Defer KSh {fields.harvest}
+            {fields.harvestSource ? ` from ${fields.harvestSource}` : ""}
+            {" "}— that would cover the gap.
+          </p>
+        </div>
+      )}
+      {!fields.shortfall && !fields.obligation && !fields.harvest && (
+        <p style={{ fontSize: 13, color: "#1a1c1c", lineHeight: 1.6 }}>{fields.rawText}</p>
+      )}
     </div>
   );
 }
@@ -313,15 +400,12 @@ function StreamingCursor() {
 
 export const Chat = (): JSX.Element => {
   const { user } = useRafiki();
-  const [location] = useLocation();
   const userId = user?.userId ?? "";
 
   // Parse ?q= from URL
   const initialMessage = (() => {
     try {
-      const search = window.location.search;
-      const params = new URLSearchParams(search);
-      return params.get("q") ?? "";
+      return new URLSearchParams(window.location.search).get("q") ?? "";
     } catch {
       return "";
     }
@@ -338,7 +422,6 @@ export const Chat = (): JSX.Element => {
   const inputRef = useRef<HTMLInputElement>(null);
   const autoSubmittedRef = useRef(false);
 
-  // Scroll to bottom
   const scrollToBottom = useCallback(() => {
     requestAnimationFrame(() => {
       if (threadRef.current) {
@@ -347,15 +430,24 @@ export const Chat = (): JSX.Element => {
     });
   }, []);
 
-  // Load conversation history
+  // Load conversation history + brake state on mount
   useEffect(() => {
     if (!userId) { setHistoryLoaded(true); return; }
 
-    const loadHistory = async () => {
+    const load = async () => {
       try {
-        const convRes = await fetch(`/api/user/${userId}/conversation`);
+        const [convRes, brakeRes] = await Promise.all([
+          fetch(`/api/user/${userId}/conversation`),
+          fetch(`/api/user/${userId}/brake`),
+        ]);
+
+        if (brakeRes.ok) {
+          const brakeData: { emergencyBrakeActive: boolean } = await brakeRes.json();
+          setBrakeActive(brakeData.emergencyBrakeActive);
+        }
+
         if (!convRes.ok) { setHistoryLoaded(true); return; }
-        const conv = await convRes.json();
+        const conv: { id: string } = await convRes.json();
         setConversationId(conv.id);
 
         const msgRes = await fetch(`/api/chat/${conv.id}/messages`);
@@ -364,13 +456,16 @@ export const Chat = (): JSX.Element => {
 
         const loaded: ThreadMessage[] = raw
           .filter((m) => m.role === "user" || m.role === "assistant")
-          .map((m) => ({
-            id: m.id,
-            role: m.role as "user" | "assistant",
-            content: m.content,
-            kind: "text",
-            redAlert: m.role === "assistant" && isRedAlert(m.content),
-          }));
+          .map((m) => {
+            const ra = m.role === "assistant" ? parseRedAlert(m.content) : null;
+            return {
+              id: m.id,
+              role: m.role as "user" | "assistant",
+              content: m.content,
+              kind: "text",
+              redAlert: ra ?? undefined,
+            };
+          });
 
         setMessages(loaded);
         setHistoryLoaded(true);
@@ -379,15 +474,8 @@ export const Chat = (): JSX.Element => {
       }
     };
 
-    loadHistory();
+    load();
   }, [userId]);
-
-  // Sync brake from rafiki context (user record has emergencyBrakeActive)
-  useEffect(() => {
-    if (user && "emergencyBrakeActive" in (user as any)) {
-      setBrakeActive(!!(user as any).emergencyBrakeActive);
-    }
-  }, [user]);
 
   // Auto-scroll when messages change
   useEffect(() => {
@@ -398,12 +486,10 @@ export const Chat = (): JSX.Element => {
   useEffect(() => {
     if (!historyLoaded || !initialMessage || autoSubmittedRef.current) return;
     autoSubmittedRef.current = true;
-    setInputValue(initialMessage);
-    // Submit after a tiny delay to let state settle
     setTimeout(() => {
       sendMessage(initialMessage);
-      setInputValue("");
-    }, 100);
+    }, 80);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyLoaded, initialMessage]);
 
   // ── SSE stream sender ───────────────────────────────────────────────────────
@@ -432,10 +518,7 @@ export const Chat = (): JSX.Element => {
       scrollToBottom();
 
       try {
-        const body: Record<string, unknown> = {
-          userId,
-          message: text.trim(),
-        };
+        const body: Record<string, unknown> = { userId, message: text.trim() };
         if (conversationId) body.conversationId = conversationId;
 
         const res = await fetch("/api/chat", {
@@ -474,11 +557,7 @@ export const Chat = (): JSX.Element => {
             if (!raw) continue;
 
             let event: Record<string, unknown>;
-            try {
-              event = JSON.parse(raw);
-            } catch {
-              continue;
-            }
+            try { event = JSON.parse(raw); } catch { continue; }
 
             const type = event.type as string;
 
@@ -488,9 +567,7 @@ export const Chat = (): JSX.Element => {
               if (chunk) {
                 setMessages((prev) =>
                   prev.map((m) =>
-                    m.id === aiMsgId
-                      ? { ...m, content: m.content + chunk }
-                      : m
+                    m.id === aiMsgId ? { ...m, content: m.content + chunk } : m
                   )
                 );
                 scrollToBottom();
@@ -505,13 +582,7 @@ export const Chat = (): JSX.Element => {
               setMessages((prev) =>
                 prev.map((m) =>
                   m.id === aiMsgId
-                    ? {
-                        ...m,
-                        kind: "proposal",
-                        proposal,
-                        proposalState: "pending",
-                        streaming: false,
-                      }
+                    ? { ...m, kind: "proposal", proposal, proposalState: "pending", streaming: false }
                     : m
                 )
               );
@@ -526,13 +597,7 @@ export const Chat = (): JSX.Element => {
               setMessages((prev) =>
                 prev.map((m) =>
                   m.id === aiMsgId
-                    ? {
-                        ...m,
-                        kind: "cascade",
-                        cascade,
-                        proposalState: "pending",
-                        streaming: false,
-                      }
+                    ? { ...m, kind: "cascade", cascade, proposalState: "pending", streaming: false }
                     : m
                 )
               );
@@ -540,22 +605,18 @@ export const Chat = (): JSX.Element => {
               const convId = event.conversationId as string | undefined;
               if (convId) setConversationId(convId);
               setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === aiMsgId
-                    ? { ...m, streaming: false, redAlert: isRedAlert(m.content) }
-                    : m
-                )
+                prev.map((m) => {
+                  if (m.id !== aiMsgId) return m;
+                  const ra = parseRedAlert(m.content);
+                  return { ...m, streaming: false, redAlert: ra ?? undefined };
+                })
               );
               setIsStreaming(false);
             } else if (type === "error") {
               setMessages((prev) =>
                 prev.map((m) =>
                   m.id === aiMsgId
-                    ? {
-                        ...m,
-                        content: (event.message as string) || "Something went wrong.",
-                        streaming: false,
-                      }
+                    ? { ...m, content: (event.message as string) || "Something went wrong.", streaming: false }
                     : m
                 )
               );
@@ -586,9 +647,11 @@ export const Chat = (): JSX.Element => {
   };
 
   const handleProposalSent = (msgId: string) => {
-    setMessages((prev) =>
-      prev.map((m) => (m.id === msgId ? { ...m, proposalState: "sent" } : m))
-    );
+    setMessages((prev) => prev.map((m) => (m.id === msgId ? { ...m, proposalState: "sent" } : m)));
+  };
+
+  const handleProposalError = (msgId: string) => {
+    setMessages((prev) => prev.map((m) => (m.id === msgId ? { ...m, proposalState: "error" } : m)));
   };
 
   const handleProposalChangeAmount = () => {
@@ -596,9 +659,7 @@ export const Chat = (): JSX.Element => {
   };
 
   const handleCascadeConfirm = (msgId: string) => {
-    setMessages((prev) =>
-      prev.map((m) => (m.id === msgId ? { ...m, proposalState: "sent" } : m))
-    );
+    setMessages((prev) => prev.map((m) => (m.id === msgId ? { ...m, proposalState: "sent" } : m)));
   };
 
   const handleBrakeToggle = async () => {
@@ -606,37 +667,38 @@ export const Chat = (): JSX.Element => {
     const next = !brakeActive;
     setBrakeLoading(true);
     try {
-      await fetch(`/api/user/${userId}/brake`, {
+      const res = await fetch(`/api/user/${userId}/brake`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ active: next }),
       });
-      setBrakeActive(next);
-
-      const ackMsg: ThreadMessage = {
-        id: uid(),
-        role: "assistant",
-        content: next
-          ? "Emergency brake is now on. All standing instructions are paused — nothing moves automatically until you switch it off."
-          : "Emergency brake is off. Your standing instructions will resume as normal.",
-        kind: "text",
-      };
-      setMessages((prev) => [...prev, ackMsg]);
-      scrollToBottom();
+      if (res.ok) {
+        setBrakeActive(next);
+        const ackMsg: ThreadMessage = {
+          id: uid(),
+          role: "assistant",
+          content: next
+            ? "Emergency brake is now on. All standing instructions are paused — nothing moves automatically until you switch it off."
+            : "Emergency brake is off. Your standing instructions will resume as normal.",
+          kind: "text",
+        };
+        setMessages((prev) => [...prev, ackMsg]);
+        scrollToBottom();
+      }
     } catch {
-      // silent
+      // silent — brake toggle failed, UI unchanged
     } finally {
       setBrakeLoading(false);
     }
   };
 
-  // ── Render ────────────────────────────────────────────────────────────────
-
+  // ── Layout constants ───────────────────────────────────────────────────────
   const inputBarHeight = 56;
-  const brakeStripHeight = 40;
+  const brakeStripHeight = 44;
   const bottomNavHeight = 72;
-  const bottomOffset = bottomNavHeight + inputBarHeight + brakeStripHeight + 8;
+  const bottomOffset = bottomNavHeight + inputBarHeight + brakeStripHeight + 4;
 
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <AppLayout>
       <style>{`
@@ -679,7 +741,7 @@ export const Chat = (): JSX.Element => {
                 flexDirection: "column",
                 alignItems: "center",
                 justifyContent: "center",
-                paddingTop: "30vh",
+                paddingTop: "28vh",
                 gap: 12,
                 animation: "fadeIn 0.3s ease",
               }}
@@ -706,7 +768,7 @@ export const Chat = (): JSX.Element => {
                 </svg>
               </div>
               <p style={{ fontSize: 15, fontWeight: 500, color: "#1a1c1c" }}>Ask RAFIKI anything</p>
-              <p style={{ fontSize: 13, color: "#3f4945", textAlign: "center", lineHeight: 1.5 }}>
+              <p style={{ fontSize: 13, color: "#3f4945", textAlign: "center", lineHeight: 1.5, maxWidth: 240 }}>
                 Send money, check your health, or ask what's coming up this month.
               </p>
             </div>
@@ -741,7 +803,6 @@ export const Chat = (): JSX.Element => {
               )}
 
               {msg.role === "user" ? (
-                /* User bubble — filled teal pill, 4px bottom-right */
                 <div
                   style={{
                     background: "linear-gradient(135deg, #00342b 0%, #004d40 100%)",
@@ -755,10 +816,16 @@ export const Chat = (): JSX.Element => {
                   </p>
                 </div>
               ) : msg.kind === "text" ? (
-                /* RAFIKI text — no bubble, editorial style */
                 <div style={{ maxWidth: "92%" }}>
                   {msg.redAlert ? (
-                    <RedAlertInset text={msg.content} />
+                    <>
+                      {msg.content && (
+                        <p style={{ fontSize: 14, fontWeight: 400, color: "#1a1c1c", lineHeight: 1.65, marginBottom: 6, whiteSpace: "pre-wrap" }}>
+                          {msg.content.split(".")[0]}.
+                        </p>
+                      )}
+                      <RedAlertInset fields={msg.redAlert} />
+                    </>
                   ) : (
                     <p
                       style={{
@@ -775,19 +842,9 @@ export const Chat = (): JSX.Element => {
                   )}
                 </div>
               ) : msg.kind === "proposal" ? (
-                /* RAFIKI text + proposal card */
                 <div style={{ maxWidth: "92%" }}>
                   {msg.content && (
-                    <p
-                      style={{
-                        fontSize: 14,
-                        fontWeight: 400,
-                        color: "#1a1c1c",
-                        lineHeight: 1.65,
-                        marginBottom: 4,
-                        whiteSpace: "pre-wrap",
-                      }}
-                    >
+                    <p style={{ fontSize: 14, fontWeight: 400, color: "#1a1c1c", lineHeight: 1.65, marginBottom: 4, whiteSpace: "pre-wrap" }}>
                       {msg.content}
                     </p>
                   )}
@@ -796,22 +853,13 @@ export const Chat = (): JSX.Element => {
                     userId={userId}
                     onChangeAmount={handleProposalChangeAmount}
                     onSent={handleProposalSent}
+                    onError={handleProposalError}
                   />
                 </div>
               ) : msg.kind === "cascade" ? (
-                /* RAFIKI text + cascade card */
                 <div style={{ maxWidth: "92%" }}>
                   {msg.content && (
-                    <p
-                      style={{
-                        fontSize: 14,
-                        fontWeight: 400,
-                        color: "#1a1c1c",
-                        lineHeight: 1.65,
-                        marginBottom: 4,
-                        whiteSpace: "pre-wrap",
-                      }}
-                    >
+                    <p style={{ fontSize: 14, fontWeight: 400, color: "#1a1c1c", lineHeight: 1.65, marginBottom: 4, whiteSpace: "pre-wrap" }}>
                       {msg.content}
                     </p>
                   )}
@@ -827,20 +875,21 @@ export const Chat = (): JSX.Element => {
       <div
         style={{
           position: "fixed",
-          bottom: bottomNavHeight + inputBarHeight + 4,
+          bottom: bottomNavHeight + inputBarHeight + 2,
           left: 0,
           right: 0,
           zIndex: 40,
-          padding: "0 16px",
+          padding: "2px 16px",
         }}
       >
         <div
+          data-testid="emergency-brake-strip"
           style={{
             maxWidth: 420,
             margin: "0 auto",
             background: brakeActive ? "rgba(192,57,43,0.08)" : "#f3f3f3",
             borderRadius: 10,
-            padding: "6px 14px",
+            padding: "7px 14px",
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
@@ -882,7 +931,6 @@ export const Chat = (): JSX.Element => {
               gap: 6,
             }}
           >
-            {/* Toggle pill */}
             <div
               style={{
                 width: 34,
@@ -974,7 +1022,7 @@ export const Chat = (): JSX.Element => {
                 alignItems: "center",
               }}
             >
-              {/* Mic button (non-functional, rendered per spec) */}
+              {/* Mic button — non-functional, rendered per spec */}
               <button
                 type="button"
                 data-testid="button-mic"
