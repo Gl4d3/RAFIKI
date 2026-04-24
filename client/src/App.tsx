@@ -17,6 +17,7 @@ import { Home } from "@/pages/Home";
 import { Chat } from "@/pages/Chat";
 import { Goals } from "@/pages/Goals";
 import { Activity } from "@/pages/Activity";
+import { Instructions } from "@/pages/Instructions";
 
 function OnboardingGuard({ children }: { children: React.ReactNode }) {
   const { user, isLoading } = useRafiki();
