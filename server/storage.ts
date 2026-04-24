@@ -334,8 +334,8 @@ export class MemStorage implements IStorage {
   }
   async getEntities(userId: string) { return this.entitiesList.get(userId) || []; }
   async updateEntity(id: string, updates: Partial<Entity>) {
-    for (const [, list] of this.entitiesList.entries()) {
-      const idx = list.findIndex((e) => e.id === id);
+    for (const [, list] of Array.from(this.entitiesList.entries())) {
+      const idx = list.findIndex((e: Entity) => e.id === id);
       if (idx >= 0) { list[idx] = { ...list[idx], ...updates }; return list[idx]; }
     }
     return undefined;
@@ -407,8 +407,8 @@ export class MemStorage implements IStorage {
     return g;
   }
   async updateGoal(id: string, updates: Partial<Goal>): Promise<Goal | undefined> {
-    for (const [, list] of this.goalsList.entries()) {
-      const idx = list.findIndex((g) => g.id === id);
+    for (const [, list] of Array.from(this.goalsList.entries())) {
+      const idx = list.findIndex((g: Goal) => g.id === id);
       if (idx >= 0) { list[idx] = { ...list[idx], ...updates }; return list[idx]; }
     }
     return undefined;
@@ -423,8 +423,8 @@ export class MemStorage implements IStorage {
     return i;
   }
   async updateStandingInstruction(id: string, updates: Partial<StandingInstruction>): Promise<StandingInstruction | undefined> {
-    for (const [, list] of this.instructionsList.entries()) {
-      const idx = list.findIndex((i) => i.id === id);
+    for (const [, list] of Array.from(this.instructionsList.entries())) {
+      const idx = list.findIndex((instr: StandingInstruction) => instr.id === id);
       if (idx >= 0) { list[idx] = { ...list[idx], ...updates }; return list[idx]; }
     }
     return undefined;

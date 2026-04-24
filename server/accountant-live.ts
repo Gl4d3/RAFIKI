@@ -258,22 +258,21 @@ export function computeHealthScore(
   // Goal progress adjustment: when goals exist, compute on-track ratio and
   // apply it to partially recover the obligation score (up to 10 pts bonus,
   // capped so total never exceeds 100). Goals contribute 0 when no rows.
+  // Status enum: "on_track" | "at_risk" | "paused"
   let goalBonus = 0;
   if (userGoals.length > 0 && !anyPastDue) {
-    const activeGoals = userGoals.filter((g) => g.status === "active");
+    const activeGoals = userGoals.filter((g) => g.status !== "paused");
     if (activeGoals.length > 0) {
       const onTrack = activeGoals.filter((g) => {
         if (!g.targetAmount || g.targetAmount === 0) return false;
+        const createdMs = g.createdAt ? new Date(g.createdAt).getTime() : Date.now();
+        const deadlineMs = g.deadline ? new Date(g.deadline).getTime() : 0;
         const progressFraction =
-          g.targetDate
-            ? Math.min(
-                1,
-                (Date.now() - new Date(g.createdAt).getTime()) /
-                  (new Date(g.targetDate).getTime() - new Date(g.createdAt).getTime())
-              )
+          deadlineMs > createdMs
+            ? Math.min(1, (Date.now() - createdMs) / (deadlineMs - createdMs))
             : 0.5;
         const expectedSaved = g.targetAmount * progressFraction;
-        return (g.savedAmount || 0) >= expectedSaved;
+        return (g.currentAmount || 0) >= expectedSaved;
       });
       const onTrackRatio = onTrack.length / activeGoals.length;
       goalBonus = Math.round(onTrackRatio * 10);

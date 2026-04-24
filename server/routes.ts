@@ -187,7 +187,7 @@ export async function registerRoutes(
   // ── Poll analysis job status ─────────────────────────────────────────────
   app.get("/api/onboarding/job/:jobId", async (req: Request, res: Response) => {
     try {
-      const { jobId } = req.params;
+      const { jobId } = req.params as Record<string, string>;
       const job = await storage.getAnalysisJob(jobId);
       if (!job) {
         return res.status(404).json({ error: "Job not found" });
@@ -201,7 +201,7 @@ export async function registerRoutes(
   // ── Get current onboarding state for user ───────────────────────────────
   app.get("/api/onboarding/state/:userId", async (req: Request, res: Response) => {
     try {
-      const { userId } = req.params;
+      const { userId } = req.params as Record<string, string>;
       const user = await storage.getUser(userId);
       if (!user) {
         return res.status(404).json({ error: "User not found" });
@@ -230,7 +230,7 @@ export async function registerRoutes(
     "/api/onboarding/job/:jobId/ai-choice",
     async (req: Request, res: Response) => {
       try {
-        const { jobId } = req.params;
+        const { jobId } = req.params as Record<string, string>;
         const { choice, userId } = req.body as {
           choice?: string;
           userId?: string;
@@ -371,7 +371,7 @@ export async function registerRoutes(
   // ── Get home screen data ─────────────────────────────────────────────────
   app.get("/api/home/:userId", async (req: Request, res: Response) => {
     try {
-      const { userId } = req.params;
+      const { userId } = req.params as Record<string, string>;
       const user = await storage.getUser(userId);
       if (!user) {
         return res.status(404).json({ error: "User not found" });
@@ -425,7 +425,7 @@ export async function registerRoutes(
   // ── Financial state ──────────────────────────────────────────────────────
   app.get("/api/user/:id/financial-state", async (req: Request, res: Response) => {
     try {
-      const { id } = req.params;
+      const { id } = req.params as Record<string, string>;
       const user = await storage.getUser(id);
       if (!user) return res.status(404).json({ error: "User not found" });
 
@@ -444,7 +444,7 @@ export async function registerRoutes(
   // ── Simulate a spend action ───────────────────────────────────────────────
   app.post("/api/user/:id/simulate", async (req: Request, res: Response) => {
     try {
-      const { id } = req.params;
+      const { id } = req.params as Record<string, string>;
       const { amount, category } = req.body as { amount?: number; category?: string };
 
       if (typeof amount !== "number" || amount <= 0) {
@@ -481,7 +481,7 @@ export async function registerRoutes(
   // ── Health score ──────────────────────────────────────────────────────────
   app.get("/api/user/:id/health-score", async (req: Request, res: Response) => {
     try {
-      const { id } = req.params;
+      const { id } = req.params as Record<string, string>;
       const user = await storage.getUser(id);
       if (!user) return res.status(404).json({ error: "User not found" });
 
@@ -506,7 +506,7 @@ export async function registerRoutes(
   // ── Priority cascade ──────────────────────────────────────────────────────
   app.post("/api/user/:id/priority-cascade", async (req: Request, res: Response) => {
     try {
-      const { id } = req.params;
+      const { id } = req.params as Record<string, string>;
       const { incomeAmount } = req.body as { incomeAmount?: number };
 
       if (typeof incomeAmount !== "number" || incomeAmount <= 0) {
@@ -536,7 +536,7 @@ export async function registerRoutes(
   // ── Conversation: get or create the user's main thread ───────────────────
   app.get("/api/user/:id/conversation", async (req: Request, res: Response) => {
     try {
-      const { id } = req.params;
+      const { id } = req.params as Record<string, string>;
       const user = await storage.getUser(id);
       if (!user) return res.status(404).json({ error: "User not found" });
       const conv = await storage.getOrCreateConversation(id);
@@ -551,7 +551,7 @@ export async function registerRoutes(
   // to avoid leaking whether a conversation exists for another user.
   app.get("/api/chat/:conversationId/messages", async (req: Request, res: Response) => {
     try {
-      const { conversationId } = req.params;
+      const { conversationId } = req.params as Record<string, string>;
       const { userId } = req.query as { userId?: string };
 
       if (!userId) {
@@ -573,7 +573,7 @@ export async function registerRoutes(
   // ── Goals: list ───────────────────────────────────────────────────────────
   app.get("/api/user/:id/goals", async (req: Request, res: Response) => {
     try {
-      const { id } = req.params;
+      const { id } = req.params as Record<string, string>;
       const user = await storage.getUser(id);
       if (!user) return res.status(404).json({ error: "User not found" });
 
@@ -606,7 +606,7 @@ export async function registerRoutes(
   // ── Goals: create ─────────────────────────────────────────────────────────
   app.post("/api/user/:id/goals", async (req: Request, res: Response) => {
     try {
-      const { id } = req.params;
+      const { id } = req.params as Record<string, string>;
       const { name, targetAmount, weeklyContribution, deadline } = req.body;
       if (!name || typeof targetAmount !== "number") {
         return res.status(400).json({ error: "name and targetAmount are required" });
@@ -640,7 +640,7 @@ export async function registerRoutes(
   // ── Activity events: list ─────────────────────────────────────────────────
   app.get("/api/user/:id/activity", async (req: Request, res: Response) => {
     try {
-      const { id } = req.params;
+      const { id } = req.params as Record<string, string>;
       const { kind } = req.query as { kind?: string };
 
       const user = await storage.getUser(id);
@@ -716,7 +716,7 @@ export async function registerRoutes(
   // ── Standing instructions: list ───────────────────────────────────────────
   app.get("/api/user/:id/instructions", async (req: Request, res: Response) => {
     try {
-      const { id } = req.params;
+      const { id } = req.params as Record<string, string>;
       const user = await storage.getUser(id);
       if (!user) return res.status(404).json({ error: "User not found" });
       const instrs = await storage.getStandingInstructions(id);
@@ -731,7 +731,7 @@ export async function registerRoutes(
   // leaking existence of another user's instructions.
   app.patch("/api/instruction/:instrId", async (req: Request, res: Response) => {
     try {
-      const { instrId } = req.params;
+      const { instrId } = req.params as Record<string, string>;
       const { userId, ...updates } = req.body as { userId?: string; isActive?: boolean; pausedReason?: string };
 
       if (!userId) {
@@ -755,7 +755,7 @@ export async function registerRoutes(
   // userId is REQUIRED as a query param. Returns 404 for wrong owner.
   app.delete("/api/instruction/:instrId", async (req: Request, res: Response) => {
     try {
-      const { instrId } = req.params;
+      const { instrId } = req.params as Record<string, string>;
       const { userId } = req.query as { userId?: string };
 
       if (!userId) {
@@ -777,7 +777,7 @@ export async function registerRoutes(
   // ── Emergency brake ───────────────────────────────────────────────────────
   app.patch("/api/user/:id/brake", async (req: Request, res: Response) => {
     try {
-      const { id } = req.params;
+      const { id } = req.params as Record<string, string>;
       const { active } = req.body as { active: boolean };
       const user = await storage.getUser(id);
       if (!user) return res.status(404).json({ error: "User not found" });
@@ -809,7 +809,7 @@ export async function registerRoutes(
   // ── Transfer confirm (stub — logs to activity, no payment rail) ───────────
   app.post("/api/user/:id/transfer-confirm", async (req: Request, res: Response) => {
     try {
-      const { id } = req.params;
+      const { id } = req.params as Record<string, string>;
       const { amount, recipient } = req.body as { amount?: number; recipient?: string };
       if (!amount || !recipient) {
         return res.status(400).json({ error: "amount and recipient are required" });
