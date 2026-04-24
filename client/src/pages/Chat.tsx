@@ -356,7 +356,9 @@ function RedAlertInset({ fields }: { fields: RedAlertFields }) {
           <p style={{ fontSize: 13, fontWeight: 500, color: "#1a1c1c" }}>{fields.obligation}</p>
           {fields.daysUntilDue && (
             <p style={{ fontSize: 12, color: "#3f4945", marginTop: 2 }}>
-              Due in {fields.daysUntilDue} {parseInt(fields.daysUntilDue) === 1 ? "day" : "days"}
+              {/^\d+$/.test(fields.daysUntilDue)
+                ? `Due in ${fields.daysUntilDue} ${parseInt(fields.daysUntilDue) === 1 ? "day" : "days"}`
+                : `Due ${fields.daysUntilDue}`}
             </p>
           )}
         </div>
@@ -575,6 +577,7 @@ export const Chat = (): JSX.Element => {
               }
             } else if (type === "proposal") {
               // Server sends { type:"proposal", amount, recipient }
+              // Keep streaming:true — more tokens may arrive before type:done
               const proposal: ProposalData = {
                 amount: event.amount as number,
                 recipient: event.recipient as string,
@@ -583,12 +586,13 @@ export const Chat = (): JSX.Element => {
               setMessages((prev) =>
                 prev.map((m) =>
                   m.id === aiMsgId
-                    ? { ...m, kind: "proposal", proposal, proposalState: "pending", streaming: false }
+                    ? { ...m, kind: "proposal", proposal, proposalState: "pending" }
                     : m
                 )
               );
             } else if (type === "cascade") {
               // Server sends { type:"cascade", allocation: CascadeAllocation[] }
+              // Keep streaming:true — more tokens may arrive before type:done
               const waterfall = (event.allocation as CascadeAllocation[]) ?? [];
               const cascade: CascadeData = {
                 waterfall,
@@ -598,7 +602,7 @@ export const Chat = (): JSX.Element => {
               setMessages((prev) =>
                 prev.map((m) =>
                   m.id === aiMsgId
-                    ? { ...m, kind: "cascade", cascade, proposalState: "pending", streaming: false }
+                    ? { ...m, kind: "cascade", cascade, proposalState: "pending" }
                     : m
                 )
               );
