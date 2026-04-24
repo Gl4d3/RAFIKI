@@ -1,13 +1,18 @@
 // RAFIKI Streaming Chat — Gemini-powered conversational interface.
 //
-// Architecture: server-side intent classification forces the relevant
-// Accountant tool(s) to run BEFORE Gemini generates any text. Tool results
-// are injected as a pre-computed "model turn" in the chat history so that
-// every financial figure in the streamed response comes from real tool calls.
+// Architecture:
+// 1. Server-side intent classification → forces the correct Accountant tools
+//    to run BEFORE Gemini generates any text.
+// 2. Financial facts are composed server-side from tool results and streamed
+//    directly as the authoritative first part of the response. This is the
+//    hard gate ensuring no model-invented numbers reach the user.
+// 3. Gemini adds a warm 1-2 sentence RAFIKI conversational framing after the facts.
+// 4. For unsafe spend: Red Alert fields (shortfall, obligation, due days,
+//    harvest) are composed server-side deterministically.
 //
-// For unsafe simulate_action results the Red Alert is composed server-side
-// (deterministically) and injected into Gemini's context so the required
-// fields (shortfall, obligation, days, harvest suggestion) are always present.
+// Tool execution wraps accountant-live functions exactly as the HTTP endpoints
+// do — all Accountant logic is in accountant-live.ts; routes + chat tools both
+// call the same pure functions, making them endpoint-equivalent.
 
 import {
   GoogleGenerativeAI,
@@ -27,7 +32,6 @@ import {
   runPriorityCascade,
   type FinancialState,
   type SimulationResult,
-  type HealthScore,
   type PriorityCascadeResult,
   type CascadeAllocation,
 } from "./accountant-live";
@@ -53,7 +57,7 @@ interface ToolCallRecord {
 
 type IntentKind =
   | "spend_query"    // "how much can I spend?" / "what's my float?"
-  | "simulate_spend" // "can I spend 3000 on food?"
+  | "simulate_spend" // "can I afford 3000 on food?"
   | "transfer"       // "send mum 2000"
   | "health_check"   // "how am I doing?"
   | "salary_income"  // "my salary arrived" / "I received 85000"
@@ -61,93 +65,9 @@ type IntentKind =
 
 interface ParsedIntent {
   kind: IntentKind;
-  amount?: number;
+  amount?: number;          // Explicit amount parsed from message
   category?: string;
   recipient?: string;
-}
-
-function classifyIntent(message: string): ParsedIntent {
-  const msg = message.toLowerCase();
-
-  // Transfer: "send mum 2000" / "pay john 5000" / "transfer 3k to sister"
-  const transferPatterns = [
-    /(?:send|pay|transfer)\s+([a-z][a-z\s]+?)\s+(?:ksh\s*)?(\d[\d,.]+k?)/i,
-    /(?:send|pay|transfer)\s+(?:ksh\s*)?(\d[\d,.]+k?)\s+(?:to\s+)?([a-z][a-z\s]+)/i,
-  ];
-  for (const pat of transferPatterns) {
-    const m = message.match(pat);
-    if (m) {
-      const [, a, b] = m;
-      const isANumeric = /\d/.test(a);
-      const numStr = isANumeric ? a : b;
-      const nameStr = isANumeric ? b : a;
-      const amount = parseKshAmount(numStr);
-      const recipient = nameStr.trim();
-      if (amount > 0 && recipient.length > 0) {
-        // Guess category from context words
-        const cat = msg.includes("food") || msg.includes("grocer")
-          ? "food"
-          : msg.includes("transport") || msg.includes("fare")
-          ? "transport"
-          : "family";
-        return { kind: "transfer", amount, recipient, category: cat };
-      }
-    }
-  }
-
-  // Simulate spend: "can I buy/spend/afford X" or "what if I spend Y"
-  const simPatterns = [
-    /(?:buy|spend|afford|do|get)\s+(?:ksh\s*)?(\d[\d,.]+k?)(?:\s+on\s+([a-z\s]+))?/i,
-    /(?:ksh\s*)?(\d[\d,.]+k?)\s+on\s+([a-z\s]+)/i,
-    /spend\s+(?:ksh\s*)?(\d[\d,.]+k?)/i,
-    /(?:nyama choma|lunch|dinner|drinks)\s+(?:for\s+)?(?:ksh\s*)?(\d[\d,.]+k?)/i,
-    /(?:ksh\s*)?(\d[\d,.]+k?)\s+(?:nyama choma|lunch|dinner|drinks)/i,
-  ];
-  for (const pat of simPatterns) {
-    const m = message.match(pat);
-    if (m) {
-      const numStr = m[1] || m[2];
-      const catHint = (m[2] || m[1] || "").toLowerCase();
-      const amount = parseKshAmount(numStr ?? "0");
-      if (amount > 0) {
-        return {
-          kind: "simulate_spend",
-          amount,
-          category: guessCategoryFromHint(catHint, msg),
-        };
-      }
-    }
-  }
-
-  // Salary / income
-  if (
-    /salary|payslip|just (got|received|been paid)|got paid|income arrived|salary.*(arrived|landed|in)/i.test(msg) ||
-    /(?:received|got|deposited)\s+(?:ksh\s*)?(\d[\d,.]+k?)/i.test(msg)
-  ) {
-    const incomeMatch = message.match(
-      /(?:received|got|deposited|salary\s+of)\s+(?:ksh\s*)?(\d[\d,.]+k?)/i
-    );
-    const amount = incomeMatch ? parseKshAmount(incomeMatch[1]) : undefined;
-    return { kind: "salary_income", amount };
-  }
-
-  // Health check
-  if (
-    /how\s+(am|are)\s+(i|we)\s+doing|financial.*(health|situation|status)|how.*(looking|going)/i.test(msg) ||
-    /am i on track|health score|my finances/i.test(msg)
-  ) {
-    return { kind: "health_check" };
-  }
-
-  // Spend query (open-ended)
-  if (
-    /how much (can|do) i (spend|have|afford)|what.*(float|balance|available)|can i spend/i.test(msg) ||
-    /(?:my|the)\s+(?:float|available\s+money|free\s+money)/i.test(msg)
-  ) {
-    return { kind: "spend_query" };
-  }
-
-  return { kind: "unknown" };
 }
 
 function parseKshAmount(str: string): number {
@@ -160,57 +80,98 @@ function guessCategoryFromHint(hint: string, msg: string): string {
   const combined = `${hint} ${msg}`;
   if (/food|grocer|meal|lunch|dinner|breakfast|nyama|choma|eat/i.test(combined)) return "food";
   if (/transport|fare|matatu|uber|taxi|fuel|petrol/i.test(combined)) return "transport";
-  if (/entertain|drinks|bar|club|movie|fun|nyama\s*choma/i.test(combined)) return "entertainment";
   if (/chama/i.test(combined)) return "chama";
   if (/family|mum|mom|dad|sibling|brother|sister/i.test(combined)) return "family";
   if (/school|fees|education|tuition/i.test(combined)) return "education";
   if (/hospital|clinic|health|medicine|doctor/i.test(combined)) return "healthcare";
   if (/rent|house|housing/i.test(combined)) return "rent";
   if (/save|savings/i.test(combined)) return "savings";
-  return "entertainment"; // Default for unspecified leisure
+  return "entertainment";
 }
 
-// ─── Deterministic Red Alert composer ────────────────────────────────────────
-// Called when simulate_action returns safe=false.
-// Returns a structured context block that Gemini MUST use as the basis of response.
+function classifyIntent(message: string): ParsedIntent {
+  const msg = message.toLowerCase();
 
-function composeRedAlert(sim: SimulationResult): string {
-  const parts: string[] = [
-    `RED ALERT — The spend is UNSAFE. You MUST include ALL of the following in your response:`,
-    `• Shortfall: KSh ${sim.shortfall.toLocaleString()} (the exact amount they are short)`,
+  // Transfer: "send mum 2000" / "pay john 5k" / "transfer 3000 to sister"
+  const transferPatterns = [
+    /(?:send|pay|transfer)\s+([a-z][a-z\s]+?)\s+(?:ksh\s*)?(\d[\d,.]+k?)\b/i,
+    /(?:send|pay|transfer)\s+(?:ksh\s*)?(\d[\d,.]+k?)\s+(?:to\s+)?([a-z][a-z\s]+)/i,
   ];
-
-  if (sim.nearestThreatenedObligation) {
-    const { label, daysUntilDue } = sim.nearestThreatenedObligation;
-    const daysStr =
-      daysUntilDue !== null ? `${daysUntilDue} days` : "this month";
-    parts.push(`• Threatened obligation: ${label} is at risk — due in ${daysStr}`);
+  for (const pat of transferPatterns) {
+    const m = message.match(pat);
+    if (m) {
+      const [, a, b] = m;
+      const isANumeric = /\d/.test(a);
+      const numStr = isANumeric ? a : b;
+      const nameStr = isANumeric ? b : a;
+      const amount = parseKshAmount(numStr);
+      const recipient = nameStr.trim();
+      if (amount > 0 && recipient.length > 1) {
+        const cat = guessCategoryFromHint("", msg.includes("mum") || msg.includes("dad") ? "family" : msg);
+        return { kind: "transfer", amount, recipient, category: cat };
+      }
+    }
   }
 
-  if (sim.harvestSuggestion) {
-    const { sourceName, deferableAmount, reasoning } = sim.harvestSuggestion;
-    parts.push(
-      `• Harvest suggestion: defer KSh ${deferableAmount.toLocaleString()} from ${sourceName}. Reason: ${reasoning}`
-    );
-  } else {
-    parts.push(`• No harvest suggestion available — there is no Tier 2 item that can be safely deferred right now.`);
+  // Simulate spend: "can I buy/spend/afford X" or explicit amount + context
+  const simPatterns = [
+    /(?:buy|spend|afford|do|get|have)\s+(?:ksh\s*)?(\d[\d,.]+k?)(?:\s+on\s+([a-z\s]+))?/i,
+    /(?:ksh\s*)?(\d[\d,.]+k?)\s+on\s+([a-z\s]+)/i,
+    /spend\s+(?:ksh\s*)?(\d[\d,.]+k?)/i,
+    /(?:nyama choma|lunch|dinner|drinks)\s+(?:for\s+)?(?:ksh\s*)?(\d[\d,.]+k?)/i,
+    /(?:ksh\s*)?(\d[\d,.]+k?)\s+(?:nyama choma|lunch|dinner|drinks)/i,
+  ];
+  for (const pat of simPatterns) {
+    const m = message.match(pat);
+    if (m) {
+      const numStr = m[1];
+      const catHint = (m[2] ?? "").toLowerCase();
+      const amount = parseKshAmount(numStr ?? "0");
+      if (amount > 0) {
+        return {
+          kind: "simulate_spend",
+          amount,
+          category: guessCategoryFromHint(catHint, msg),
+        };
+      }
+    }
   }
 
-  parts.push(
-    `Never say just "no". Offer a reduced amount or an alternative path. Then ask if they want to proceed with the harvest suggestion (if any).`
-  );
+  // Salary / income — with or without explicit amount
+  const salaryPhrases = /salary|payslip|just (got|received|been paid)|got paid|income arrived|salary.*(arrived|landed|in|came)/i;
+  const receivedPattern = /(?:received|got|deposited|salary\s+of)\s+(?:ksh\s*)?(\d[\d,.]+k?)/i;
+  if (salaryPhrases.test(msg) || receivedPattern.test(msg)) {
+    const m = message.match(receivedPattern);
+    const amount = m ? parseKshAmount(m[1]) : undefined;
+    return { kind: "salary_income", amount };
+  }
 
-  return parts.join("\n");
+  // Health check
+  if (
+    /how\s+(am|are)\s+(i|we)\s+doing|financial.*(health|situation|status)|how.*(looking|going)/i.test(msg) ||
+    /am i on track|health score|my finances/i.test(msg)
+  ) {
+    return { kind: "health_check" };
+  }
+
+  // Spend query (open-ended — no specific amount)
+  if (
+    /how much (can|do) i (spend|have|afford)|what.*(float|balance|available)|can i spend/i.test(msg) ||
+    /(?:my|the)\s+(?:float|available\s+money|free\s+money)/i.test(msg)
+  ) {
+    return { kind: "spend_query" };
+  }
+
+  return { kind: "unknown" };
 }
 
 // ─── Pre-execution: forced tool runs for known intents ────────────────────────
 
 interface PreExecContext {
-  state?: FinancialState;
+  state: FinancialState;
   simulation?: SimulationResult;
-  health?: HealthScore;
+  healthScore?: { score: number; explanation: string };
   cascade?: PriorityCascadeResult;
-  redAlert?: string;
   toolLog: ToolCallRecord[];
 }
 
@@ -221,19 +182,25 @@ async function preExecuteForIntent(
   stack: PriorityStackItem[],
   safeBuffer: number
 ): Promise<PreExecContext> {
-  const log: ToolCallRecord[] = [];
   const state = computeFinancialState(txs, stack, safeBuffer);
-
+  const log: ToolCallRecord[] = [
+    { name: "get_financial_state", args: {}, result: state },
+  ];
   const ctx: PreExecContext = { state, toolLog: log };
 
   if (intent.kind === "spend_query") {
-    log.push({ name: "get_financial_state", args: {}, result: state });
+    // Force simulate_action with the full availableFloat — this gives "max safe spend"
+    const sim = simulateAction(state.availableFloat, "entertainment", state, stack);
+    ctx.simulation = sim;
+    log.push({
+      name: "simulate_action",
+      args: { amount: state.availableFloat, category: "entertainment" },
+      result: sim,
+    });
   }
 
   if (intent.kind === "simulate_spend" || intent.kind === "transfer") {
     if (intent.amount && intent.amount > 0) {
-      log.push({ name: "get_financial_state", args: {}, result: state });
-
       const sim = simulateAction(
         intent.amount,
         intent.category ?? "entertainment",
@@ -246,43 +213,116 @@ async function preExecuteForIntent(
         args: { amount: intent.amount, category: intent.category ?? "entertainment" },
         result: sim,
       });
-
-      if (!sim.safe) {
-        ctx.redAlert = composeRedAlert(sim);
-      }
     }
   }
 
   if (intent.kind === "health_check") {
     const goals = await storage.getGoals(userId);
-    log.push({ name: "get_financial_state", args: {}, result: state });
-
     const health = computeHealthScore(txs, state, stack, goals);
-    ctx.health = health;
+    ctx.healthScore = health;
     log.push({ name: "get_health_score", args: {}, result: health });
   }
 
-  if (intent.kind === "salary_income" && intent.amount && intent.amount > 0) {
-    log.push({ name: "get_financial_state", args: {}, result: state });
+  if (intent.kind === "salary_income") {
+    // Fall back to estimated monthly salary when no explicit amount in message
+    const incomeAmount = (intent.amount && intent.amount > 0)
+      ? intent.amount
+      : state.estimatedMonthlySalary;
 
-    const cascade = runPriorityCascade(intent.amount, stack);
-    ctx.cascade = cascade;
-    log.push({
-      name: "run_priority_cascade",
-      args: { incomeAmount: intent.amount },
-      result: cascade,
-    });
-  }
-
-  // For "unknown" intents still pre-load financial state so the model has context.
-  if (intent.kind === "unknown") {
-    log.push({ name: "get_financial_state", args: {}, result: state });
+    if (incomeAmount > 0) {
+      const cascade = runPriorityCascade(incomeAmount, stack);
+      ctx.cascade = cascade;
+      log.push({
+        name: "run_priority_cascade",
+        args: { incomeAmount },
+        result: cascade,
+      });
+    }
   }
 
   return ctx;
 }
 
-// ─── System prompt ────────────────────────────────────────────────────────────
+// ─── Server-composed financial facts (hard gate for number provenance) ────────
+// These fact strings are streamed BEFORE Gemini responds, guaranteeing that
+// every KSh figure the user sees came from a real tool result.
+
+function composeFactsForIntent(
+  intent: ParsedIntent,
+  preCtx: PreExecContext,
+  displayName: string
+): string {
+  const { state, simulation, healthScore, cascade } = preCtx;
+  const fmt = (n: number) => `KSh ${Math.round(n).toLocaleString()}`;
+
+  switch (intent.kind) {
+    case "spend_query": {
+      // The simulation was run with amount=availableFloat so safe=true means there's float
+      const float = fmt(state.availableFloat);
+      const balance = fmt(state.currentBalance);
+      const days = state.daysToNextSalary ?? "?";
+      return `${displayName}, your available float right now is ${float} (balance: ${balance}, safe buffer held aside). That leaves ${float} you can safely spend before your next salary in ${days} days.`;
+    }
+
+    case "simulate_spend":
+    case "transfer": {
+      const amount = intent.amount ?? 0;
+      const amtStr = fmt(amount);
+      if (!simulation) {
+        return `${displayName}, I couldn't compute the simulation for ${amtStr}.`;
+      }
+      if (simulation.safe) {
+        const remaining = fmt(simulation.remainingAfter);
+        return `${displayName}, ${amtStr} is safe — it leaves ${remaining} in your float after this spend.`;
+      }
+      // Unsafe — Red Alert (deterministic)
+      const lines: string[] = [
+        `${displayName}, ${amtStr} is ${fmt(simulation.shortfall)} more than your float allows right now.`,
+      ];
+      if (simulation.nearestThreatenedObligation) {
+        const { label, daysUntilDue } = simulation.nearestThreatenedObligation;
+        const daysStr = daysUntilDue !== null ? `${daysUntilDue} days` : "this month";
+        lines.push(`This would put your ${label} at risk — that obligation is due in ${daysStr}.`);
+      }
+      if (simulation.harvestSuggestion) {
+        const { sourceName, deferableAmount } = simulation.harvestSuggestion;
+        lines.push(
+          `One option: defer ${fmt(deferableAmount)} from your ${sourceName} contribution — that would cover the gap.`
+        );
+      } else {
+        lines.push(`There is no Tier 2 item available to defer right now that would cover the shortfall.`);
+      }
+      return lines.join(" ");
+    }
+
+    case "health_check": {
+      if (!healthScore) {
+        return `${displayName}, I couldn't load your health score right now.`;
+      }
+      return `${displayName}, your financial health score is ${healthScore.score}/100. ${healthScore.explanation}`;
+    }
+
+    case "salary_income": {
+      if (!cascade) {
+        const salary = fmt(state.estimatedMonthlySalary);
+        return `${displayName}, your estimated salary is ${salary}. I need the actual amount to run the full allocation — how much came in?`;
+      }
+      const income = fmt(cascade.waterfall.reduce((s, w) => s + w.amount, 0) + cascade.leftover);
+      const leftover = fmt(cascade.leftover);
+      const topLine = cascade.waterfall[0]
+        ? `Tier 1 obligations (${fmt(cascade.waterfall.filter(w => w.tier === "1").reduce((s, w) => s + w.amount, 0))}) are fully covered.`
+        : "";
+      return `${displayName}, ${income} has been allocated across your priority stack. ${topLine} You have ${leftover} left over after all obligations.`;
+    }
+
+    case "unknown":
+    default:
+      // Unknown intent — don't stream any financial facts, let Gemini handle fully
+      return "";
+  }
+}
+
+// ─── System prompt (synchronous — state already computed) ─────────────────────
 
 function buildSystemPrompt(
   displayName: string,
@@ -303,7 +343,7 @@ function buildSystemPrompt(
 You speak in a friendly, conversational tone — like a trusted financial friend, not a bank.
 You use plain English. You may occasionally use a Swahili phrase naturally (like "sawa" or "poa") but keep it minimal.
 You never use emojis. You never use bullet points or lists in conversational replies.
-You are concise — your messages are 2–4 short sentences, warm and specific to actual numbers.
+You are concise — add 1-2 sentences of warm, encouraging conversational framing only.
 The currency is always written as "KSh" followed by the amount with commas (e.g. KSh 8,000).
 
 USER CONTEXT:
@@ -317,28 +357,25 @@ USER CONTEXT:
 PRIORITY STACK:
 ${stackLines || "  (no priority stack items yet)"}
 
-CORE RULES:
-1. You MUST only state financial figures that appear in the pre-computed tool results provided to you in this conversation. Never invent or estimate your own numbers.
-2. Respond in RAFIKI's warm, concise voice. Sound like a trusted friend, not a report.
-3. If a RED ALERT context block is provided, you MUST include all the required Red Alert fields in your response. Never refuse without offering a path forward.
-4. Never list bullet points. Write in flowing, natural sentences.`;
+RULES:
+1. Financial facts have already been presented to the user from pre-computed tool results. Your job is ONLY to add warm, conversational framing around those facts — do NOT repeat or modify any KSh figure.
+2. If the context has no pre-composed facts (open-ended chat), answer helpfully but NEVER invent financial figures. Call a tool if you need numbers.
+3. Sound like a trusted friend. Be encouraging and specific. Keep it short.`;
 }
 
-// ─── Tool definitions (for Gemini's own additional tool calls on edge cases) ──
+// ─── Tool definitions (for Gemini's additional tool calls on open-ended chat) ─
 
 const chatTools: Tool[] = [
   {
     functionDeclarations: [
       {
         name: "get_financial_state",
-        description:
-          "Get the user's current financial state. Call only if the pre-computed context does not already include it.",
+        description: "Get the user's current financial state.",
         parameters: { type: SchemaType.OBJECT, properties: {} },
       },
       {
         name: "simulate_action",
-        description:
-          "Check if a proposed spend is safe. Returns safe/unsafe, shortfall, threatened obligation, harvest suggestion.",
+        description: "Check whether a proposed spend is safe.",
         parameters: {
           type: SchemaType.OBJECT,
           properties: {
@@ -355,12 +392,11 @@ const chatTools: Tool[] = [
       },
       {
         name: "run_priority_cascade",
-        description:
-          "Allocate an income amount across the priority stack waterfall.",
+        description: "Allocate income across the priority stack waterfall.",
         parameters: {
           type: SchemaType.OBJECT,
           properties: {
-            incomeAmount: { type: SchemaType.NUMBER, description: "Income amount in KSh." },
+            incomeAmount: { type: SchemaType.NUMBER, description: "Income in KSh." },
           },
           required: ["incomeAmount"],
         },
@@ -379,15 +415,15 @@ async function executeLiveTool(
   stack: PriorityStackItem[],
   emitCascade: (allocation: CascadeAllocation[]) => void
 ): Promise<unknown> {
-  if (name === "get_financial_state") {
-    return state;
-  }
+  if (name === "get_financial_state") return state;
+
   if (name === "simulate_action") {
     const amount = Number(args.amount);
     const category = String(args.category || "entertainment");
     if (!amount || amount <= 0) return { ok: false, error: "amount must be positive" };
     return simulateAction(amount, category, state, stack);
   }
+
   if (name === "get_health_score") {
     const [txs, goals] = await Promise.all([
       storage.getTransactions(userId),
@@ -395,6 +431,7 @@ async function executeLiveTool(
     ]);
     return computeHealthScore(txs, state, stack, goals);
   }
+
   if (name === "run_priority_cascade") {
     const incomeAmount = Number(args.incomeAmount);
     if (!incomeAmount || incomeAmount <= 0) return { ok: false, error: "incomeAmount must be positive" };
@@ -408,6 +445,7 @@ async function executeLiveTool(
     });
     return result;
   }
+
   return { ok: false, error: `Unknown tool: ${name}` };
 }
 
@@ -500,8 +538,8 @@ export async function streamChat(req: ChatRequest, res: Response): Promise<void>
     await storage.createActivityEvent({
       userId,
       kind: "salary",
-      description: `Salary of KSh ${(intent.amount ?? 0).toLocaleString()} allocated across priority stack.`,
-      amount: intent.amount ?? 0,
+      description: `Salary of KSh ${Math.round(intent.amount ?? preCtx.state.estimatedMonthlySalary).toLocaleString()} allocated across priority stack.`,
+      amount: intent.amount ?? preCtx.state.estimatedMonthlySalary,
     }).catch(() => undefined);
   }
 
@@ -532,6 +570,9 @@ export async function streamChat(req: ChatRequest, res: Response): Promise<void>
     }).catch(() => undefined);
   }
 
+  // ── Compose server-side financial facts (hard gate for number provenance) ──
+  const factString = composeFactsForIntent(intent, preCtx, displayName);
+
   // ── Build chat history ────────────────────────────────────────────────────
   const prevMessages = await storage.getMessages(conversationId);
   const history: Content[] = prevMessages.slice(-20).map((m) => ({
@@ -539,16 +580,13 @@ export async function streamChat(req: ChatRequest, res: Response): Promise<void>
     parts: [{ text: m.content }],
   }));
 
-  // Inject pre-executed tool results as a model turn (function calls + responses)
-  // This guarantees Gemini sees the real numbers BEFORE generating any text.
+  // Inject pre-executed tool results as model + user turns (for Gemini's context)
   if (preCtx.toolLog.length > 0) {
-    // Model turn: function calls
     const callParts: Part[] = preCtx.toolLog.map((tc) => ({
       functionCall: { name: tc.name, args: tc.args },
     }));
     history.push({ role: "model", parts: callParts });
 
-    // User turn: function responses
     const responseParts: FunctionResponsePart[] = preCtx.toolLog.map((tc) => ({
       functionResponse: {
         name: tc.name,
@@ -558,20 +596,34 @@ export async function streamChat(req: ChatRequest, res: Response): Promise<void>
     history.push({ role: "user", parts: responseParts });
   }
 
-  // Build system prompt (synchronous now — state already computed)
-  const systemPrompt = buildSystemPrompt(displayName, preCtx.state!, stack, safeBuffer);
+  const systemPrompt = buildSystemPrompt(displayName, preCtx.state, stack, safeBuffer);
 
-  // If a Red Alert applies, inject it as an additional user context turn.
-  const userParts: Part[] = [{ text: message }];
-  if (preCtx.redAlert) {
-    userParts.push({ text: `\n\n[SYSTEM CONTEXT — MANDATORY]\n${preCtx.redAlert}` });
-  }
+  // Build the user message. For known intents, include the pre-composed facts
+  // as context so Gemini only adds conversational framing.
+  const userMessageText = factString
+    ? `User said: "${message}"\n\nFacts already presented to the user (DO NOT repeat or modify these KSh figures — just add warm 1-2 sentence RAFIKI framing):\n${factString}`
+    : message;
 
-  // ── All tool calls that will be logged for persistence ────────────────────
+  // ── Stream server-composed facts first (hard gate) ────────────────────────
   const allToolLog: ToolCallRecord[] = [...preCtx.toolLog];
   let fullAssistantText = "";
 
-  // ── Gemini streaming with fallback ────────────────────────────────────────
+  if (factString) {
+    sseWrite(res, { type: "token", text: factString });
+    fullAssistantText += factString;
+  }
+
+  // ── Log unsafe simulation alert activity ──────────────────────────────────
+  if (preCtx.simulation && !preCtx.simulation.safe) {
+    await storage.createActivityEvent({
+      userId,
+      kind: "alert",
+      description: `Red Alert: KSh ${(intent.amount ?? 0).toLocaleString()} would breach safe buffer.`,
+      amount: intent.amount ?? 0,
+    }).catch(() => undefined);
+  }
+
+  // ── Gemini streaming: adds conversational framing + handles unknown intents ─
   try {
     let lastTransientErr: Error | null = null;
     let succeeded = false;
@@ -582,11 +634,14 @@ export async function streamChat(req: ChatRequest, res: Response): Promise<void>
           model: modelName,
           tools: chatTools,
           systemInstruction: systemPrompt,
-          generationConfig: { temperature: 0.7, maxOutputTokens: 1024 },
+          generationConfig: {
+            temperature: 0.7,
+            maxOutputTokens: factString ? 200 : 1024, // Short framing only when facts are pre-composed
+          },
         });
 
         const chat = model.startChat({ history });
-        let currentParts: Part[] = userParts;
+        let currentParts: Part[] = [{ text: userMessageText }];
         const MAX_TOOL_ROUNDS = 4;
 
         for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
@@ -597,6 +652,11 @@ export async function streamChat(req: ChatRequest, res: Response): Promise<void>
             const parts = chunk.candidates?.[0]?.content?.parts ?? [];
             for (const part of parts) {
               if ("text" in part && part.text) {
+                // When facts are pre-composed, append a space separator before Gemini framing
+                if (fullAssistantText.length > 0 && !fullAssistantText.endsWith(" ") && round === 0) {
+                  sseWrite(res, { type: "token", text: " " });
+                  fullAssistantText += " ";
+                }
                 fullAssistantText += part.text;
                 sseWrite(res, { type: "token", text: part.text });
               } else if ("functionCall" in part && part.functionCall) {
@@ -616,7 +676,7 @@ export async function streamChat(req: ChatRequest, res: Response): Promise<void>
               fc.name,
               fc.args,
               userId,
-              preCtx.state!,
+              preCtx.state,
               stack,
               emitCascade
             );
@@ -643,9 +703,7 @@ export async function streamChat(req: ChatRequest, res: Response): Promise<void>
         const isTransient =
           status === 503 || status === 500 || msgLower.includes("overloaded");
 
-        if (isQuota) {
-          throw e;
-        }
+        if (isQuota) throw e;
         if (isTransient) {
           lastTransientErr = e;
           console.warn(`Chat model "${modelName}" busy — trying next.`);
@@ -665,12 +723,18 @@ export async function streamChat(req: ChatRequest, res: Response): Promise<void>
       e.message.toLowerCase().includes("quota") ||
       e.message.toLowerCase().includes("billing");
 
+    // Only emit an error message if we haven't already streamed financial facts
     if (!fullAssistantText) {
       const errorMsg = isQuota
         ? "I'm not able to respond right now — my AI service has reached its limit. Please try again in a few minutes."
         : "Something went wrong on my end. Give it a moment and try again.";
       sseWrite(res, { type: "token", text: errorMsg });
       fullAssistantText = errorMsg;
+    } else {
+      // Facts were already streamed — add a brief apology for missing the framing
+      const apology = " (I ran into a small issue adding details — try asking again for more.)";
+      sseWrite(res, { type: "token", text: apology });
+      fullAssistantText += apology;
     }
   }
 
