@@ -545,88 +545,100 @@ export const Chat = (): JSX.Element => {
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
+        let receivedDone = false;
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
+        const processLine = (line: string) => {
+          if (!line.startsWith("data: ")) return;
+          const raw = line.slice(6).trim();
+          if (!raw) return;
+          let event: Record<string, unknown>;
+          try { event = JSON.parse(raw); } catch { return; }
+          const type = event.type as string;
 
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() ?? "";
-
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            const raw = line.slice(6).trim();
-            if (!raw) continue;
-
-            let event: Record<string, unknown>;
-            try { event = JSON.parse(raw); } catch { continue; }
-
-            const type = event.type as string;
-
-            if (type === "token") {
-              // Server sends { type:"token", text:"..." }
-              const chunk = (event.text as string) ?? (event.token as string) ?? "";
-              if (chunk) {
-                setMessages((prev) =>
-                  prev.map((m) =>
-                    m.id === aiMsgId ? { ...m, content: m.content + chunk } : m
-                  )
-                );
-                scrollToBottom();
-              }
-            } else if (type === "proposal") {
-              // Server sends { type:"proposal", amount, recipient }
-              // Keep streaming:true — more tokens may arrive before type:done
-              const proposal: ProposalData = {
-                amount: event.amount as number,
-                recipient: event.recipient as string,
-                context: event.context as string | undefined,
-              };
+          if (type === "token") {
+            const chunk = (event.text as string) ?? (event.token as string) ?? "";
+            if (chunk) {
               setMessages((prev) =>
                 prev.map((m) =>
-                  m.id === aiMsgId
-                    ? { ...m, kind: "proposal", proposal, proposalState: "pending" }
-                    : m
+                  m.id === aiMsgId ? { ...m, content: m.content + chunk } : m
                 )
               );
-            } else if (type === "cascade") {
-              // Server sends { type:"cascade", allocation: CascadeAllocation[] }
-              // Keep streaming:true — more tokens may arrive before type:done
-              const waterfall = (event.allocation as CascadeAllocation[]) ?? [];
-              const cascade: CascadeData = {
-                waterfall,
-                leftover: (event.leftover as number) ?? 0,
-                income: (event.income as number) ?? undefined,
-              };
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === aiMsgId
-                    ? { ...m, kind: "cascade", cascade, proposalState: "pending" }
-                    : m
-                )
-              );
-            } else if (type === "done") {
-              const convId = event.conversationId as string | undefined;
-              if (convId) setConversationId(convId);
-              setMessages((prev) =>
-                prev.map((m) => {
-                  if (m.id !== aiMsgId) return m;
-                  const ra = parseRedAlert(m.content);
-                  return { ...m, streaming: false, redAlert: ra ?? undefined };
-                })
-              );
-              setIsStreaming(false);
-            } else if (type === "error") {
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === aiMsgId
-                    ? { ...m, content: (event.message as string) || "Something went wrong.", streaming: false }
-                    : m
-                )
-              );
-              setIsStreaming(false);
+              scrollToBottom();
             }
+          } else if (type === "proposal") {
+            const proposal: ProposalData = {
+              amount: event.amount as number,
+              recipient: event.recipient as string,
+              context: event.context as string | undefined,
+            };
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === aiMsgId
+                  ? { ...m, kind: "proposal", proposal, proposalState: "pending" }
+                  : m
+              )
+            );
+          } else if (type === "cascade") {
+            const waterfall = (event.allocation as CascadeAllocation[]) ?? [];
+            const cascade: CascadeData = {
+              waterfall,
+              leftover: (event.leftover as number) ?? 0,
+              income: (event.income as number) ?? undefined,
+            };
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === aiMsgId
+                  ? { ...m, kind: "cascade", cascade, proposalState: "pending" }
+                  : m
+              )
+            );
+          } else if (type === "done") {
+            receivedDone = true;
+            const convId = event.conversationId as string | undefined;
+            if (convId) setConversationId(convId);
+            setMessages((prev) =>
+              prev.map((m) => {
+                if (m.id !== aiMsgId) return m;
+                const ra = parseRedAlert(m.content);
+                return { ...m, streaming: false, redAlert: ra ?? undefined };
+              })
+            );
+            setIsStreaming(false);
+          } else if (type === "error") {
+            receivedDone = true;
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === aiMsgId
+                  ? { ...m, content: (event.message as string) || "Something went wrong.", streaming: false }
+                  : m
+              )
+            );
+            setIsStreaming(false);
+          }
+        };
+
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() ?? "";
+            for (const line of lines) processLine(line);
+          }
+          // Flush any remaining data the server sent without a trailing newline
+          if (buffer.trim()) processLine(buffer.trim());
+        } finally {
+          // Guarantee the send button always re-enables, even if type:done was missed
+          if (!receivedDone) {
+            setMessages((prev) =>
+              prev.map((m) => {
+                if (m.id !== aiMsgId) return m;
+                const ra = parseRedAlert(m.content);
+                return { ...m, streaming: false, redAlert: ra ?? undefined };
+              })
+            );
+            setIsStreaming(false);
           }
         }
       } catch {
