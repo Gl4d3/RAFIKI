@@ -472,7 +472,7 @@ export async function registerRoutes(
         });
       }
 
-      res.json({ ...result, financialState: state });
+      res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -547,9 +547,19 @@ export async function registerRoutes(
   });
 
   // ── Messages: get history for a conversation ─────────────────────────────
+  // Ownership check: the userId query param must match the conversation owner.
+  // Return 404 (not 403) to avoid leaking existence of other users' conversations.
   app.get("/api/chat/:conversationId/messages", async (req: Request, res: Response) => {
     try {
       const { conversationId } = req.params;
+      const { userId } = req.query as { userId?: string };
+
+      const conv = await storage.getConversation(conversationId);
+      if (!conv) return res.status(404).json({ error: "Conversation not found" });
+      if (userId && conv.userId !== userId) {
+        return res.status(404).json({ error: "Conversation not found" });
+      }
+
       const msgs = await storage.getMessages(conversationId);
       res.json(msgs);
     } catch (err: any) {
@@ -714,10 +724,19 @@ export async function registerRoutes(
   });
 
   // ── Standing instructions: toggle / update ────────────────────────────────
+  // userId must be provided in the body to verify ownership. Returns 404 for
+  // not-found or wrong-owner (avoids leaking existence of other users' instrs).
   app.patch("/api/instruction/:instrId", async (req: Request, res: Response) => {
     try {
       const { instrId } = req.params;
-      const updates = req.body as Partial<{ isActive: boolean; pausedReason: string }>;
+      const { userId, ...updates } = req.body as Partial<{ userId: string; isActive: boolean; pausedReason: string }>;
+
+      // Verify ownership before mutating
+      const instrs = userId ? await storage.getStandingInstructions(userId) : [];
+      if (userId && !instrs.some((i) => i.id === instrId)) {
+        return res.status(404).json({ error: "Instruction not found" });
+      }
+
       const updated = await storage.updateStandingInstruction(instrId, updates);
       if (!updated) return res.status(404).json({ error: "Instruction not found" });
       res.json(updated);
@@ -730,6 +749,16 @@ export async function registerRoutes(
   app.delete("/api/instruction/:instrId", async (req: Request, res: Response) => {
     try {
       const { instrId } = req.params;
+      const { userId } = req.query as { userId?: string };
+
+      // Verify ownership before deleting
+      if (userId) {
+        const instrs = await storage.getStandingInstructions(userId);
+        if (!instrs.some((i) => i.id === instrId)) {
+          return res.status(404).json({ error: "Instruction not found" });
+        }
+      }
+
       await storage.deleteStandingInstruction(instrId);
       res.json({ success: true });
     } catch (err: any) {
