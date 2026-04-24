@@ -61,6 +61,7 @@ export interface IStorage {
   // Conversations
   getOrCreateConversation(userId: string): Promise<Conversation>;
   getConversation(id: string): Promise<Conversation | undefined>;
+  updateConversation(id: string): Promise<void>;
 
   // Messages
   createMessage(msg: InsertMessage): Promise<Message>;
@@ -198,6 +199,10 @@ export class DbStorage implements IStorage {
   async getConversation(id: string): Promise<Conversation | undefined> {
     const [conv] = await db.select().from(conversations).where(eq(conversations.id, id));
     return conv;
+  }
+
+  async updateConversation(id: string): Promise<void> {
+    await db.update(conversations).set({ updatedAt: new Date() }).where(eq(conversations.id, id));
   }
 
   // ── Messages ───────────────────────────────────────────────────────────────
@@ -389,6 +394,14 @@ export class MemStorage implements IStorage {
   }
   async getConversation(id: string): Promise<Conversation | undefined> {
     return Array.from(this.conversationsList.values()).find((c) => c.id === id);
+  }
+  async updateConversation(id: string): Promise<void> {
+    for (const [key, conv] of Array.from(this.conversationsList.entries())) {
+      if (conv.id === id) {
+        this.conversationsList.set(key, { ...conv, updatedAt: new Date() });
+        return;
+      }
+    }
   }
   async createMessage(msg: InsertMessage): Promise<Message> {
     const m: Message = { ...msg, id: randomUUID(), createdAt: new Date(), toolCallsJson: msg.toolCallsJson ?? null };

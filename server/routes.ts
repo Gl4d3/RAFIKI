@@ -2,6 +2,7 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import multer from "multer";
 import { storage } from "./storage";
+import { streamChat } from "./chat";
 import {
   runAnalysisPipeline,
   resumeAfterAiChoice,
@@ -568,6 +569,30 @@ export async function registerRoutes(
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // ── Chat: streaming SSE endpoint ─────────────────────────────────────────
+  // POST /api/chat { userId, message, conversationId? }
+  // Streams SSE: token | proposal | cascade | done | error events.
+  app.post("/api/chat", async (req: Request, res: Response) => {
+    const { userId, message, conversationId } = req.body as {
+      userId?: string;
+      message?: string;
+      conversationId?: string;
+    };
+
+    if (!userId || !message || typeof message !== "string" || !message.trim()) {
+      res.status(400).json({ error: "userId and message are required" });
+      return;
+    }
+
+    const user = await storage.getUser(userId).catch(() => null);
+    if (!user) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
+
+    await streamChat({ userId, message: message.trim(), conversationId }, res);
   });
 
   // ── Goals: list ───────────────────────────────────────────────────────────
