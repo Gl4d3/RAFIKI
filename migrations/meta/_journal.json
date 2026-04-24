@@ -15,6 +15,13 @@
       "when": 1776958090405,
       "tag": "0001_sticky_loners",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1777006403378,
+      "tag": "0002_shallow_absorbing_man",
+      "breakpoints": true
     }
   ]
 }
