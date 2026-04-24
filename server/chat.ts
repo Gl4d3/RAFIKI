@@ -514,15 +514,21 @@ export async function streamChat(req: ChatRequest, res: Response): Promise<void>
   // Server-compose financial facts for known intents
   const factString = composeFactsForIntent(intent, preCtx, displayName);
 
-  // Build chat history
+  // Build chat history — Gemini requires history to start with "user" role.
+  // Drop any leading model messages that would otherwise cause a hard error.
   const prevMessages = await storage.getMessages(conversationId);
-  const history: Content[] = prevMessages.slice(-20).map(m => ({
+  const rawHistory: Content[] = prevMessages.slice(-20).map(m => ({
     role: m.role === "user" ? "user" : "model",
     parts: [{ text: m.content }],
   }));
+  const firstUserIdx = rawHistory.findIndex(h => h.role === "user");
+  const history: Content[] = firstUserIdx >= 0 ? rawHistory.slice(firstUserIdx) : [];
 
-  // Inject pre-executed tool results into history
-  if (preCtx.toolLog.length > 0) {
+  // Inject pre-executed tool results into history — only when there is an
+  // existing history that already starts with a "user" turn. Gemini requires
+  // the very first history entry to be role:"user"; prepending a "model"
+  // tool-call turn onto an empty history causes a hard error.
+  if (preCtx.toolLog.length > 0 && history.length > 0) {
     history.push({ role: "model", parts: preCtx.toolLog.map(tc => ({ functionCall: { name: tc.name, args: tc.args } })) });
     history.push({
       role: "user",
