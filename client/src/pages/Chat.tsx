@@ -51,30 +51,31 @@ function uid(): string {
 }
 
 function parseRedAlert(text: string): RedAlertFields | null {
-  if (
-    !text.includes("more than your float allows") &&
-    !(text.includes("at risk") && text.includes("float"))
-  ) {
+  if (!text.includes("more than your float allows")) {
     return null;
   }
 
   const fields: RedAlertFields = { rawText: text };
 
-  // "KSh X is Y more than your float allows"
-  const shortfallMatch = text.match(/KSh\s+([\d,]+)\s+is\s+([\d,]+)\s+more than your float/);
+  // Server format: "Name, KSh [spend] is KSh [shortfall] more than your float allows right now."
+  // Group 1 = spend amount (display context), Group 2 = shortfall delta
+  const shortfallMatch = text.match(/KSh\s+([\d,]+)\s+is\s+KSh\s+([\d,]+)\s+more than your float/);
   if (shortfallMatch) {
-    fields.shortfall = shortfallMatch[1];
+    fields.shortfall = shortfallMatch[2]; // the gap amount
   }
 
-  // "put your [obligation] at risk — that obligation is due in X days"
-  const obligationMatch = text.match(/put your (.+?) at risk.*?due in (\d+) days?/i);
+  // Server format: "This would put your [label] at risk — that obligation is due in [N] days."
+  // or "...due in this month." when daysUntilDue is null
+  const obligationMatch = text.match(/put your (.+?) at risk[^.]*?due in (\d+ days?|this month)/i);
   if (obligationMatch) {
     fields.obligation = obligationMatch[1].trim();
-    fields.daysUntilDue = obligationMatch[2];
+    const duePart = obligationMatch[2];
+    const dNum = duePart.match(/\d+/);
+    fields.daysUntilDue = dNum ? dNum[0] : duePart;
   }
 
-  // "defer KSh X from [source] — that would cover the gap"
-  const harvestMatch = text.match(/defer KSh\s+([\d,]+)\s+from\s+(.+?)\s+(?:—|–|-|\.)/);
+  // Server format: "One option: defer KSh [amount] from [sourceName] — that would cover the gap."
+  const harvestMatch = text.match(/defer\s+KSh\s+([\d,]+)\s+from\s+(.+?)\s+(?:—|–)/);
   if (harvestMatch) {
     fields.harvest = harvestMatch[1];
     fields.harvestSource = harvestMatch[2].trim();
@@ -450,7 +451,7 @@ export const Chat = (): JSX.Element => {
         const conv: { id: string } = await convRes.json();
         setConversationId(conv.id);
 
-        const msgRes = await fetch(`/api/chat/${conv.id}/messages`);
+        const msgRes = await fetch(`/api/chat/${conv.id}/messages?userId=${encodeURIComponent(userId)}`);
         if (!msgRes.ok) { setHistoryLoaded(true); return; }
         const raw: Array<{ id: string; role: string; content: string }> = await msgRes.json();
 
