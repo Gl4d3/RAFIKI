@@ -175,11 +175,9 @@ function GoalCard({ goal }: { goal: GoalWithStatus }) {
         </div>
       </div>
 
-      {(goal.weeklyContribution ?? 0) > 0 && (
-        <p style={{ fontSize: 12, color: "#3f4945", textAlign: "center", margin: 0 }}>
-          {fmt(goal.weeklyContribution ?? 0)} / week
-        </p>
-      )}
+      <p style={{ fontSize: 12, color: "#3f4945", textAlign: "center", margin: 0 }}>
+        {fmt(goal.weeklyContribution ?? 0)} / week
+      </p>
     </div>
   );
 }

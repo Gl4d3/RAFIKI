@@ -43,27 +43,35 @@ function groupByDate(events: ActivityEvent[]): { bucket: string; events: Activit
 
 // ── Kind helpers ──────────────────────────────────────────────────────────────
 
-type KindStyle = { dot: string; amountColor: string; isOutflow: boolean };
-
-const KIND_STYLES: Record<string, KindStyle> = {
-  transfer: { dot: "#00342b", amountColor: "#3f4945", isOutflow: true },
-  savings:  { dot: "#4755b6", amountColor: "#3f4945", isOutflow: true },
-  goal:     { dot: "#FFA000", amountColor: "#b36200", isOutflow: false },
-  salary:   { dot: "#00342b", amountColor: "#00342b", isOutflow: false },
-  system:   { dot: "#bfc9c4", amountColor: "#3f4945", isOutflow: false },
-  alert:    { dot: "#FFA000", amountColor: "#b36200", isOutflow: false },
+// Dot colour per kind: teal=transfer/salary, indigo=savings, amber=goal, grey=system/alert
+const KIND_DOT: Record<string, string> = {
+  transfer: "#00342b",
+  savings:  "#4755b6",
+  goal:     "#FFA000",
+  salary:   "#00342b",
+  system:   "#bfc9c4",
+  alert:    "#bfc9c4",
 };
 
-function kindStyle(kind: string): KindStyle {
-  return KIND_STYLES[kind] ?? KIND_STYLES.system;
+function kindDot(kind: string): string {
+  return KIND_DOT[kind] ?? "#bfc9c4";
 }
 
-function fmtAmount(ev: ActivityEvent): string | null {
+// Amount formatting: derive outflow/inflow from the sign of ev.amount
+// Negative (or outflow kinds with positive stored amount) → on-surface-variant
+// Positive → teal; null → hidden
+function fmtAmount(ev: ActivityEvent): { text: string; color: string } | null {
   if (ev.amount == null) return null;
+  const isOutflow = ev.kind === "transfer" || ev.kind === "savings";
+  const isInflow = ev.kind === "salary";
   const abs = Math.abs(ev.amount);
   const label = `KSh ${Math.round(abs).toLocaleString("en-KE")}`;
-  const ks = kindStyle(ev.kind);
-  return ks.isOutflow ? `−${label}` : label;
+
+  if (isOutflow) return { text: `−${label}`, color: "#3f4945" };
+  if (isInflow)  return { text: label, color: "#00342b" };
+  // goal / system / alert — show amount neutrally
+  if (ev.amount < 0) return { text: `−${label}`, color: "#3f4945" };
+  return { text: label, color: "#3f4945" };
 }
 
 function fmtTime(date: Date): string {
@@ -85,8 +93,8 @@ function matchesFilter(ev: ActivityEvent, filter: FilterKind): boolean {
 // ── Event Row ─────────────────────────────────────────────────────────────────
 
 function EventRow({ ev }: { ev: ActivityEvent }) {
-  const ks = kindStyle(ev.kind);
-  const amount = fmtAmount(ev);
+  const dot = kindDot(ev.kind);
+  const amt = fmtAmount(ev);
   const time = fmtTime(new Date(ev.createdAt!));
 
   return (
@@ -105,7 +113,7 @@ function EventRow({ ev }: { ev: ActivityEvent }) {
           width: 36,
           height: 36,
           borderRadius: "50%",
-          background: `${ks.dot}18`,
+          background: `${dot}18`,
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
@@ -118,7 +126,7 @@ function EventRow({ ev }: { ev: ActivityEvent }) {
             width: 10,
             height: 10,
             borderRadius: "50%",
-            background: ks.dot,
+            background: dot,
             display: "block",
           }}
         />
@@ -152,19 +160,19 @@ function EventRow({ ev }: { ev: ActivityEvent }) {
         </p>
       </div>
 
-      {amount && (
+      {amt && (
         <div style={{ textAlign: "right", flexShrink: 0 }}>
           <p
             style={{
               fontSize: 14,
               fontWeight: 500,
-              color: ks.amountColor,
+              color: amt.color,
               margin: 0,
               whiteSpace: "nowrap",
             }}
             data-testid={`text-activity-amount-${ev.id}`}
           >
-            {amount}
+            {amt.text}
           </p>
         </div>
       )}
