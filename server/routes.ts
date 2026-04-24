@@ -8,6 +8,12 @@ import {
   hasPendingAi,
   type PipelineSource,
 } from "./analysis-pipeline";
+import {
+  computeFinancialState,
+  simulateAction,
+  computeHealthScore,
+  runPriorityCascade,
+} from "./accountant-live";
 
 // Strict aggregate caps to keep memory bounded:
 // - per file: 10MB
@@ -413,6 +419,377 @@ export async function registerRoutes(
       res.json({ userId: user.id, stage: user.onboardingStage });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ── Financial state ──────────────────────────────────────────────────────
+  app.get("/api/user/:id/financial-state", async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const user = await storage.getUser(id);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      const [txs, stack] = await Promise.all([
+        storage.getTransactions(id),
+        storage.getPriorityStack(id),
+      ]);
+
+      const state = computeFinancialState(txs, stack, user.safeBuffer ?? 2000);
+      res.json(state);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Simulate a spend action ───────────────────────────────────────────────
+  app.post("/api/user/:id/simulate", async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const { amount, category } = req.body as { amount?: number; category?: string };
+
+      if (typeof amount !== "number" || amount <= 0) {
+        return res.status(400).json({ error: "amount must be a positive number" });
+      }
+
+      const user = await storage.getUser(id);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      const [txs, stack] = await Promise.all([
+        storage.getTransactions(id),
+        storage.getPriorityStack(id),
+      ]);
+
+      const state = computeFinancialState(txs, stack, user.safeBuffer ?? 2000);
+      const result = simulateAction(amount, category || "general", state, stack);
+
+      // Log a Red Alert activity event when the buffer would be breached
+      if (result.bufferBreached) {
+        await storage.createActivityEvent({
+          userId: id,
+          kind: "alert",
+          description: `Red Alert: spending KSh ${amount.toLocaleString()} would breach your safe buffer.`,
+          amount,
+        });
+      }
+
+      res.json({ ...result, financialState: state });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Health score ──────────────────────────────────────────────────────────
+  app.get("/api/user/:id/health-score", async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const user = await storage.getUser(id);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      const [txs, stack, userGoals] = await Promise.all([
+        storage.getTransactions(id),
+        storage.getPriorityStack(id),
+        storage.getGoals(id),
+      ]);
+
+      const state = computeFinancialState(txs, stack, user.safeBuffer ?? 2000);
+      const healthScore = computeHealthScore(txs, state, stack, userGoals);
+
+      // Persist the score on the user record for fast access
+      await storage.updateUser(id, { financialHealthScore: healthScore.score });
+
+      res.json(healthScore);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Priority cascade ──────────────────────────────────────────────────────
+  app.post("/api/user/:id/priority-cascade", async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const { incomeAmount } = req.body as { incomeAmount?: number };
+
+      if (typeof incomeAmount !== "number" || incomeAmount <= 0) {
+        return res.status(400).json({ error: "incomeAmount must be a positive number" });
+      }
+
+      const user = await storage.getUser(id);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      const stack = await storage.getPriorityStack(id);
+      const result = runPriorityCascade(incomeAmount, stack);
+
+      // Log the salary event
+      await storage.createActivityEvent({
+        userId: id,
+        kind: "salary",
+        description: `Salary of KSh ${incomeAmount.toLocaleString()} allocated across priority stack.`,
+        amount: incomeAmount,
+      });
+
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Conversation: get or create the user's main thread ───────────────────
+  app.get("/api/user/:id/conversation", async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const user = await storage.getUser(id);
+      if (!user) return res.status(404).json({ error: "User not found" });
+      const conv = await storage.getOrCreateConversation(id);
+      res.json(conv);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Messages: get history for a conversation ─────────────────────────────
+  app.get("/api/chat/:conversationId/messages", async (req: Request, res: Response) => {
+    try {
+      const { conversationId } = req.params;
+      const msgs = await storage.getMessages(conversationId);
+      res.json(msgs);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Goals: list ───────────────────────────────────────────────────────────
+  app.get("/api/user/:id/goals", async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const user = await storage.getUser(id);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      const userGoals = await storage.getGoals(id);
+
+      // Compute status server-side from real data
+      const withStatus = userGoals.map((g) => {
+        let status: "on_track" | "at_risk" | "paused" = "on_track";
+        if ((g.weeklyContribution ?? 0) === 0) {
+          status = "paused";
+        } else if (g.deadline) {
+          const now = new Date();
+          const weeksRemaining = Math.max(
+            0,
+            (g.deadline.getTime() - now.getTime()) / (7 * 24 * 60 * 60 * 1000)
+          );
+          const needed = (g.targetAmount - (g.currentAmount ?? 0));
+          const projectedSavings = (g.weeklyContribution ?? 0) * weeksRemaining;
+          status = projectedSavings >= needed ? "on_track" : "at_risk";
+        }
+        return { ...g, status };
+      });
+
+      res.json(withStatus);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Goals: create ─────────────────────────────────────────────────────────
+  app.post("/api/user/:id/goals", async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const { name, targetAmount, weeklyContribution, deadline } = req.body;
+      if (!name || typeof targetAmount !== "number") {
+        return res.status(400).json({ error: "name and targetAmount are required" });
+      }
+      const user = await storage.getUser(id);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      const goal = await storage.createGoal({
+        userId: id,
+        name,
+        targetAmount,
+        currentAmount: 0,
+        weeklyContribution: weeklyContribution || 0,
+        deadline: deadline ? new Date(deadline) : null,
+        status: "on_track",
+      });
+
+      await storage.createActivityEvent({
+        userId: id,
+        kind: "goal",
+        description: `New savings goal created: ${name}`,
+        amount: targetAmount,
+      });
+
+      res.json(goal);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Activity events: list ─────────────────────────────────────────────────
+  app.get("/api/user/:id/activity", async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const { kind } = req.query as { kind?: string };
+
+      const user = await storage.getUser(id);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      let events = await storage.getActivityEvents(id, kind);
+
+      // Seed from transaction history if the event log is empty
+      if (events.length === 0) {
+        const [txs, entities] = await Promise.all([
+          storage.getTransactions(id),
+          storage.getEntities(id),
+        ]);
+
+        const seedEvents: Array<Parameters<typeof storage.createActivityEvent>[0]> = [];
+
+        // Salary events
+        const salaryTxs = txs.filter((t) => t.isSalary && t.direction === "credit");
+        for (const tx of salaryTxs.slice(0, 3)) {
+          seedEvents.push({
+            userId: id,
+            kind: "salary",
+            description: `Salary received from ${tx.counterparty}`,
+            amount: tx.amount,
+          });
+        }
+
+        // Recurring Tier 1 obligation events
+        const recurringTier1 = txs.filter(
+          (t) => t.direction === "debit" && t.tier === "1" && t.isRecurring
+        );
+        const seenCounterparties = new Set<string>();
+        for (const tx of recurringTier1) {
+          if (seenCounterparties.has(tx.counterparty)) continue;
+          seenCounterparties.add(tx.counterparty);
+          seedEvents.push({
+            userId: id,
+            kind: "transfer",
+            description: `Regular payment to ${tx.counterparty}`,
+            amount: tx.amount,
+          });
+        }
+
+        // Savings events
+        const savingsTxs = txs.filter((t) => t.direction === "debit" && t.category === "savings");
+        for (const tx of savingsTxs.slice(0, 5)) {
+          seedEvents.push({
+            userId: id,
+            kind: "savings",
+            description: `Savings contribution to ${tx.counterparty}`,
+            amount: tx.amount,
+          });
+        }
+
+        for (const ev of seedEvents) {
+          await storage.createActivityEvent(ev);
+        }
+
+        events = await storage.getActivityEvents(id, kind);
+      }
+
+      // Filter by kind if requested
+      if (kind) {
+        events = events.filter((e) => e.kind === kind);
+      }
+
+      res.json(events);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Standing instructions: list ───────────────────────────────────────────
+  app.get("/api/user/:id/instructions", async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const user = await storage.getUser(id);
+      if (!user) return res.status(404).json({ error: "User not found" });
+      const instrs = await storage.getStandingInstructions(id);
+      res.json(instrs);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Standing instructions: toggle / update ────────────────────────────────
+  app.patch("/api/instruction/:instrId", async (req: Request, res: Response) => {
+    try {
+      const { instrId } = req.params;
+      const updates = req.body as Partial<{ isActive: boolean; pausedReason: string }>;
+      const updated = await storage.updateStandingInstruction(instrId, updates);
+      if (!updated) return res.status(404).json({ error: "Instruction not found" });
+      res.json(updated);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Standing instructions: delete (soft) ─────────────────────────────────
+  app.delete("/api/instruction/:instrId", async (req: Request, res: Response) => {
+    try {
+      const { instrId } = req.params;
+      await storage.deleteStandingInstruction(instrId);
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Emergency brake ───────────────────────────────────────────────────────
+  app.patch("/api/user/:id/brake", async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const { active } = req.body as { active: boolean };
+      const user = await storage.getUser(id);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      await storage.updateUser(id, { emergencyBrakeActive: active });
+
+      if (active) {
+        await storage.createActivityEvent({
+          userId: id,
+          kind: "system",
+          description: "Emergency brake activated — all automations paused.",
+          amount: null,
+        });
+      } else {
+        await storage.createActivityEvent({
+          userId: id,
+          kind: "system",
+          description: "Emergency brake deactivated.",
+          amount: null,
+        });
+      }
+
+      res.json({ success: true, emergencyBrakeActive: active });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Transfer confirm (stub — logs to activity, no payment rail) ───────────
+  app.post("/api/user/:id/transfer-confirm", async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const { amount, recipient } = req.body as { amount?: number; recipient?: string };
+      if (!amount || !recipient) {
+        return res.status(400).json({ error: "amount and recipient are required" });
+      }
+      const user = await storage.getUser(id);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      await storage.createActivityEvent({
+        userId: id,
+        kind: "transfer",
+        description: `Sent KSh ${amount.toLocaleString()} to ${recipient}`,
+        amount,
+      });
+
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
   });
 
