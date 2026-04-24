@@ -1,0 +1,146 @@
+RAFIKI is a personal finance companion for Kenya. Onboarding is complete 
+and working — the app can read a user's bank statements, understand their 
+spending, ask about unknowns, and build a priority stack. That foundation 
+is solid.
+
+Now we need to build what RAFIKI actually is. The onboarding was the 
+setup. This is the product.
+
+---
+
+THE CORE PROMISE WE HAVEN'T BUILT YET
+
+A user should be able to open RAFIKI and ask "can I afford to go out for 
+nyama choma this Friday, about 3k?" and get a specific, honest answer. 
+Not a generic budget tip. Not a percentage. A real answer: yes you can 
+and here's what you'll have left, or no you can't because rent lands in 
+4 days and here's exactly what the shortfall would be.
+
+That is the product. Everything else — the goals screen, the activity log, 
+the standing instructions — is presentation on top of that core capability.
+
+Build the core first. Then surface it through the screens.
+
+---
+
+THE BRAIN BEHIND EVERY ANSWER
+
+Every financial answer RAFIKI gives must come from deterministic logic, 
+not from the AI guessing. The AI's job is to understand what the user 
+is asking and explain the answer in a warm, conversational way. The logic's 
+job is to compute the actual numbers. These two things must never be mixed.
+
+When a user asks about spending, the logic must know: what is genuinely 
+available after all upcoming commitments are accounted for, what is already 
+spoken for before the next salary, and whether a proposed spend would put 
+any obligation at risk. The AI reads those results and speaks them back 
+in RAFIKI's voice.
+
+The priority cascade the user set up during onboarding is the rulebook. 
+Every financial decision runs through it: survival obligations first, 
+social commitments second, savings and growth third, lifestyle last.
+
+---
+
+THE MOMENT MONEY ARRIVES
+
+When salary lands, RAFIKI should spring into action before the user 
+spends a shilling. It reads the priority stack, works out where every 
+shilling should go, and presents the user with a clean summary: here 
+is how I have arranged your money, does this look right? The user 
+confirms or adjusts. This is the most powerful moment in the product 
+and it should feel like a relief, not a chore.
+
+---
+
+THE RED ALERT
+
+If a user wants to spend money that would put a survival obligation at 
+risk, RAFIKI does not just say no. It explains exactly what is at risk, 
+how much the shortfall would be, and whether there is a way to free up 
+the money by deferring a lower-priority commitment. It offers a specific 
+path forward, not a wall.
+
+This should feel like a calm, honest friend telling you something 
+important — not a warning alarm.
+
+---
+
+THE CONVERSATION INTERFACE
+
+The conversation screen is the product. This is where the user lives. 
+It should feel like messaging someone who knows your finances deeply 
+and cares about getting it right.
+
+RAFIKI speaks first sometimes. When the user opens the app and their 
+salary has just arrived, RAFIKI says so. When a standing instruction 
+fired overnight, RAFIKI mentions it. When the user is close to the 
+edge of a budget category, RAFIKI brings it up before the user asks.
+
+When RAFIKI proposes an action — sending money, saving an amount, 
+allocating a transfer — it shows a clear approval card inside the 
+conversation. The user confirms with one tap. RAFIKI never acts 
+without that confirmation.
+
+The conversation history persists. When the user opens the app 
+tomorrow, they see the thread from today. RAFIKI remembers what 
+was said.
+
+---
+
+THE SCREENS
+
+The Figma designs for the following screens have been pasted into 
+this session. Build them so that every number, every status, every 
+piece of content comes from the actual financial data built during 
+onboarding — not sample values.
+
+Home: shows the user's genuinely available balance (not the raw 
+account total — what they can actually spend without risking any 
+obligation), a single health score with a one-line explanation, 
+and one contextual nudge from RAFIKI. Everything on this screen 
+answers the question "am I okay right now?" in under three seconds.
+
+Conversation: the full message thread with RAFIKI's messages and 
+the user's messages. Inline approval cards appear when RAFIKI is 
+proposing an action. The input bar is always visible at the bottom.
+
+Snapshot sheet: slides up from the home screen when the user wants 
+more detail. Shows the health score with explanation, spending by 
+category as horizontal bars with real KSh amounts, and progress 
+on the top active goal.
+
+Goals: a list of the user's savings goals with real progress. Each 
+goal shows how far along it is, whether it is on track to hit the 
+deadline, and how much is being contributed each week. Status is 
+computed from actual progress against the target date — not a label 
+someone set manually.
+
+Activity log: every financial event in chronological order. Salary 
+arrivals, transfers, savings contributions, standing instructions 
+firing. Filterable by type. This is the audit trail — the user 
+should be able to see everything RAFIKI has done on their behalf.
+
+Standing instructions: the conditional automations the user has 
+set up. Each one shows what it does and when, whether it is 
+active or paused, and when it last fired. Paused ones show why 
+they are paused. Adding a new one opens the conversation.
+
+---
+
+WHAT GOOD LOOKS LIKE
+
+A user opens the app on the day their salary arrives. RAFIKI has 
+already run the numbers. The home screen shows their available 
+balance after all obligations are accounted for. They open the 
+conversation and RAFIKI says: your salary arrived, here is how I 
+have arranged it, want me to go ahead?
+
+They confirm. Then they ask: can I take the family out this 
+weekend, maybe 5,000 bob? RAFIKI runs the numbers and comes back: 
+yes, you will have KSh 2,800 left in your lifestyle budget after. 
+Or: that would put you below your buffer before rent — but your 
+chama contribution is not due for 12 days and your salary arrives 
+in 8, so you could defer it this cycle if you want.
+
+That is the product working.

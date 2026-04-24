@@ -1,0 +1,205 @@
+We are now building the core product capability of RAFIKI. Onboarding is 
+complete and working. We now need to wire the Accountant's financial logic 
+to the main application screens and implement the conversational AI interface 
+that is the heart of the product.
+
+This prompt has two parts: the backend logic that must work before any new 
+screen is built, and the frontend screens that present that logic. Do the 
+backend first. Do not build screens on stub data — every screen must be 
+populated from real database values.
+
+---
+
+PART 1: THE ACCOUNTANT — CORE LOGIC THAT MUST WORK FIRST
+
+The Accountant is the deterministic Python engine. Its job is to answer 
+financial questions with 100% accuracy. Before any screen is built, these 
+functions must be implemented and tested against real data from the database.
+
+Financial state calculation:
+The Accountant must be able to answer "what is my true financial situation 
+right now?" This means: current balance, what portion is already committed 
+to Tier 1 obligations in the coming days, what is genuinely free to spend, 
+and how many days until the next salary. The result is a structured object 
+that every screen and every AI response draws from. If this is wrong, 
+everything is wrong.
+
+Priority cascade evaluation:
+When income arrives or when a spending decision is being made, the Accountant 
+runs the waterfall: Tier 1 obligations are allocated first, then Tier 2 social 
+commitments, then Tier 3 savings, then Tier 4 lifestyle. The output is a 
+full allocation breakdown showing exactly where every shilling goes. This 
+powers the salary moment card and the "how much can I spend?" question.
+
+Simulate action:
+Given a proposed spend — amount, category, timing — the Accountant must 
+return: whether the spend is safe, the remaining balance after the spend, 
+the nearest upcoming obligation that could be threatened, whether the 
+emergency buffer would be breached, and whether there is a harvestable 
+amount from a deferrable Tier 2 obligation that could cover the gap. This 
+is the core function behind "can I afford to go out this weekend?"
+
+Red Alert detection:
+If simulate_action returns a buffer breach, the system must flag this. The 
+Red Alert carries: the exact shortfall amount, the specific obligation at 
+risk, the number of days until it is due, and if available, a harvest 
+suggestion with the source obligation, the deferrable amount, and the 
+reasoning for why it can be safely deferred.
+
+Health score calculation:
+A single integer 0-100 computed from: savings rate this month versus target, 
+goal progress across active goals, buffer adequacy, and whether any Tier 1 
+obligations are at risk. A one-line explanation of the score must also be 
+returned, for example "You're spending within your plan but your emergency 
+buffer is lower than usual."
+
+All of these functions must read from the actual database — the transactions, 
+entities, priority stack, and facts that were built during onboarding. No 
+hardcoded values.
+
+---
+
+PART 2: THE RAFIKI CONVERSATION ENDPOINT
+
+The conversation endpoint is the core product interface. A user sends a 
+message in English or Swahili. RAFIKI — powered by Gemini — interprets the 
+intent, calls the appropriate Accountant tool, and responds conversationally 
+with the result. This must be a streaming endpoint so responses feel 
+immediate.
+
+The AI must never compute financial values itself. It calls tools. Every 
+response that involves a number, a balance, or a decision must come from 
+an Accountant tool call, not from the model's reasoning.
+
+The conversation must handle at minimum these intents correctly:
+
+"How much can I spend?" or "Can I afford X?" 
+  → calls simulate_action, returns a specific answer with reasoning, 
+    triggers Red Alert response if breach detected
+
+"Send mum 2000" or any transfer intent
+  → calls simulate_action first to check safety
+  → if safe: creates a proposal, presents an approval card to the user
+  → if unsafe: presents the Red Alert with harvest suggestion
+  → never executes a transfer without explicit user confirmation
+
+"How am I doing?" or any financial health question
+  → calls get_financial_state and get_health_score
+  → returns a plain-language summary in RAFIKI's voice
+
+"Salary just arrived" or when income is detected
+  → calls run_priority_cascade
+  → presents a salary allocation card showing the full waterfall breakdown
+  → waits for user confirmation before routing funds
+
+The system prompt injected before every Gemini call must include the 
+user's stable profile, their priority stack, and the top relevant facts 
+from the fact store retrieved by similarity to the current message. This 
+is how RAFIKI always knows who it is talking to.
+
+---
+
+PART 3: FRONTEND SCREENS
+
+Build these screens using the exact design specifications from the Figma 
+designs already pasted into this session. Every value shown must be live 
+data from the Accountant, not sample data.
+
+HOME SCREEN
+The balance shown is the available_float from get_financial_state, not the 
+raw account balance. The health score dot and one-line explanation come from 
+get_health_score. The nudge card content is generated by Gemini using the 
+financial state as context — one relevant observation, one action. The 
+"View financial snapshot" link opens the Snapshot Sheet as a bottom sheet 
+overlay. The three quick action buttons each open the conversation with 
+their intent pre-loaded: "Send me money", "How am I doing", "What's coming 
+up". The input bar opens the full conversation. The emergency brake strip 
+at the bottom is a database flag — tapping it sets all automations to paused 
+and shows the active warning state with a Deactivate button.
+
+CONVERSATION SCREEN
+A scrollable message thread. RAFIKI messages appear left-aligned with no 
+bubble, just a small RAFIKI label above. User messages appear right-aligned 
+in a filled teal pill. Inline approval cards render inside the thread when 
+RAFIKI proposes a transfer — showing the amount, recipient, reasoning strip 
+with budget context, and two buttons: Change amount (returns to conversation) 
+and Send now (executes via execute_transfer after policy check). The emergency 
+brake strip appears above the input bar in its active state when braking is 
+on. The input bar is always pinned to the bottom with a text field and a 
+voice button.
+
+SNAPSHOT SHEET (bottom sheet from Home)
+Triggered by tapping the health score row or the "View financial snapshot" 
+link. Slides up over the Home screen with a blurred background behind it. 
+Shows the health score as a circular arc with the score number and a 
+status label. Below the arc, a one-paragraph explanation and an action 
+suggestion. Spending breakdown as horizontal bars — one per active category 
+from the priority stack, with the KSh total and a proportional bar. Fixed 
+expenses use teal, variable use indigo. The active savings goal at the 
+bottom with a circular progress arc and projected completion date. A "See 
+full activity" link navigates to the Activity Log.
+
+GOALS SCREEN
+A scrollable list of goal cards. Each card shows: status pill (On Track in 
+teal-tinted container, At Risk in amber-tinted, Paused in grey), goal name, 
+a centred circular progress arc showing the percentage complete, two columns 
+below the arc showing saved amount and target, and the weekly contribution 
+amount. Goal status is computed by the Accountant: if the current savings 
+rate projects to completion before the deadline it is On Track, if behind 
+it is At Risk, if contributions have been paused it is Paused. A floating 
+"New goal" button in the bottom right opens the conversation with "I want 
+to save for..." pre-filled.
+
+ACTIVITY LOG SCREEN
+A chronological feed of every financial event. Each entry has a coloured 
+circle icon on the left (teal for sends, indigo for savings, amber for 
+goals, grey for system events), a description line, an amount on the right 
+in medium weight, and a timestamp below in micro-label style. A filter chip 
+row at the top: All, Sends, Savings, Goals, Alerts. The active chip uses 
+the indigo container colour. The filter row scrolls horizontally with a 
+right-edge fade gradient to indicate overflow. Group entries under date 
+headers: Today, Yesterday, Earlier this week, then specific dates.
+
+STANDING INSTRUCTIONS SCREEN
+A list of instruction cards. Each card shows the trigger condition as the 
+heading (e.g. "Every Monday"), the action as the subtitle (e.g. "Send me 
+KSh 500"), and a toggle on the right for active/paused state. Active cards 
+use the indigo toggle colour. Paused cards are displayed at 50% opacity 
+and show a status label "Paused · [reason]" and a Resume pill button 
+instead of the toggle. Tapping an active card expands it to show Last 
+Triggered date, Logic type, and a Remove instruction button in red. A 
+floating "Add instruction" button at the bottom opens the conversation 
+with intent pre-loaded. Instructions are evaluated by the Accountant on 
+a schedule — if conditions are met, a proposal is created.
+
+---
+
+WIRING REQUIREMENTS
+
+Bottom navigation must be consistent across all screens: Home, Chat 
+(Conversation), Goals, Activity. The active tab shows a filled icon with 
+a 4px teal dot beneath it. The navigation bar has a glassmorphism treatment: 
+surface colour at 80% opacity with a 12px backdrop-blur.
+
+All screens must share a single source of financial state. If the user 
+confirms a transfer on the Conversation screen, the balance on the Home 
+screen must reflect that change on next load. There is no local state that 
+diverges from the database.
+
+The conversation history must persist across sessions. When the user opens 
+the Conversation screen, they see their full message history, not a blank 
+slate.
+
+---
+
+SUCCESS CRITERION
+
+A user should be able to:
+1. Open the app, see their real available balance and health score on Home
+2. Tap "How am I doing" and receive a specific, accurate response from RAFIKI 
+   that quotes their actual numbers
+3. Ask "Can I go out for nyama choma this Friday, maybe 3k?" and receive 
+   either a clear yes with the remaining balance, or a Red Alert with a 
+   specific harvest suggestion
+4. See their goals with real progress arcs based on actual savings data
+5. See every financial action from onboarding in the Activity Log
