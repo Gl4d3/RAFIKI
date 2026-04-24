@@ -537,7 +537,6 @@ export async function registerRoutes(
       const state = computeFinancialState(txs, stack, user.safeBuffer ?? 2000);
 
       // Find the nearest Tier 1 obligation for the nudge context
-      const now = new Date();
       let nearestObligationLabel: string | undefined;
       let nearestObligationDays: number | undefined;
       const tier1Items = stack.filter(i => i.isActive && i.tier === "1");
