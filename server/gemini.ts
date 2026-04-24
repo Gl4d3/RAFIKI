@@ -489,6 +489,61 @@ Begin enriching. Call tools as needed. Stop when done.`;
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Home screen nudge — single warm sentence summarising the user's situation
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface NudgeContext {
+  displayName: string;
+  availableFloat: number;
+  currentBalance: number;
+  estimatedMonthlySalary: number;
+  daysToNextSalary: number | null;
+  safeBuffer: number;
+  nearestObligationLabel?: string;
+  nearestObligationDays?: number;
+}
+
+export async function generateNudge(ctx: NudgeContext): Promise<string> {
+  const daysLine = ctx.daysToNextSalary !== null
+    ? `Days until next salary: ${ctx.daysToNextSalary}`
+    : "Next salary date: unknown";
+  const obligationLine = ctx.nearestObligationLabel && ctx.nearestObligationDays !== undefined
+    ? `Nearest upcoming obligation: ${ctx.nearestObligationLabel} in ${ctx.nearestObligationDays} days`
+    : "";
+
+  const prompt = `${RAFIKI_PERSONA}
+
+You are writing a single nudge sentence for the user's home screen. This appears beneath the available float number.
+
+User context:
+- Available float: KSh ${ctx.availableFloat.toLocaleString()}
+- Current balance: KSh ${ctx.currentBalance.toLocaleString()}
+- Safe buffer: KSh ${ctx.safeBuffer.toLocaleString()}
+- Estimated monthly salary: KSh ${ctx.estimatedMonthlySalary.toLocaleString()}
+- ${daysLine}
+${obligationLine ? `- ${obligationLine}` : ""}
+
+Write ONE short, warm, specific sentence (15 words max) that gives the user a useful, grounded insight about their current situation. Examples:
+- "Rent lands in 4 days — your float already accounts for it."
+- "You have 8 days until salary — float looks comfortable."
+- "Your buffer is holding steady with 3 days to go."
+Never use emojis. Never invent numbers not listed above. Output only the sentence, nothing else.`;
+
+  return await generateWithFallback(prompt);
+}
+
+export function buildOfflineNudge(ctx: NudgeContext): string {
+  const days = ctx.daysToNextSalary;
+  if (days !== null && days <= 3) {
+    return `Salary arrives in ${days} day${days === 1 ? "" : "s"} — you are almost there.`;
+  }
+  if (ctx.nearestObligationLabel && ctx.nearestObligationDays !== undefined) {
+    return `${ctx.nearestObligationLabel} is due in ${ctx.nearestObligationDays} days — your float reflects this.`;
+  }
+  return `Your available float is KSh ${ctx.availableFloat.toLocaleString()} — good to check in today.`;
+}
+
 function dispatchTool(
   txs: EnrichableTransaction[],
   name: string,

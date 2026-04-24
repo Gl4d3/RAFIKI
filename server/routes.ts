@@ -15,6 +15,11 @@ import {
   computeHealthScore,
   runPriorityCascade,
 } from "./accountant-live";
+import {
+  generateNudge,
+  buildOfflineNudge,
+  GeminiUnavailableError,
+} from "./gemini";
 
 // Strict aggregate caps to keep memory bounded:
 // - per file: 10MB
@@ -499,6 +504,70 @@ export async function registerRoutes(
       await storage.updateUser(id, { financialHealthScore: healthScore.score });
 
       res.json(healthScore);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Priority stack: read ──────────────────────────────────────────────────
+  app.get("/api/user/:id/stack", async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params as Record<string, string>;
+      const user = await storage.getUser(id);
+      if (!user) return res.status(404).json({ error: "User not found" });
+      const stack = await storage.getPriorityStack(id);
+      res.json(stack.sort((a, b) => a.rank - b.rank));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Home screen nudge — single Gemini sentence, cached per session ────────
+  app.post("/api/user/:id/nudge", async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params as Record<string, string>;
+      const user = await storage.getUser(id);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      const [txs, stack] = await Promise.all([
+        storage.getTransactions(id),
+        storage.getPriorityStack(id),
+      ]);
+
+      const state = computeFinancialState(txs, stack, user.safeBuffer ?? 2000);
+
+      // Find the nearest Tier 1 obligation for the nudge context
+      const now = new Date();
+      let nearestObligationLabel: string | undefined;
+      let nearestObligationDays: number | undefined;
+      const tier1Items = stack.filter(i => i.isActive && i.tier === "1");
+      if (tier1Items.length > 0 && state.daysToNextSalary !== null) {
+        const item = tier1Items[0];
+        nearestObligationLabel = item.label;
+        nearestObligationDays = Math.max(0, state.daysToNextSalary);
+      }
+
+      const ctx = {
+        displayName: user.displayName || user.username,
+        availableFloat: state.availableFloat,
+        currentBalance: state.currentBalance,
+        estimatedMonthlySalary: state.estimatedMonthlySalary,
+        daysToNextSalary: state.daysToNextSalary,
+        safeBuffer: user.safeBuffer ?? 2000,
+        nearestObligationLabel,
+        nearestObligationDays,
+      };
+
+      try {
+        const nudge = await generateNudge(ctx);
+        res.json({ nudge });
+      } catch (err: unknown) {
+        if (err instanceof GeminiUnavailableError) {
+          res.json({ nudge: buildOfflineNudge(ctx) });
+        } else {
+          throw err;
+        }
+      }
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
