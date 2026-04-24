@@ -91,8 +91,12 @@ export function computeFinancialState(
     : null;
 
   // Committed amount: sum of all active Tier 1 monthly obligations.
-  // These are obligations due before the next salary — we use the full monthly
-  // amount (no proration). Zero when there are no Tier 1 items.
+  // Monthly-cycle assumption: every Tier 1 item is a recurring monthly
+  // obligation that is due within the current salary cycle. The priority_stack_items
+  // schema does not carry per-item due dates, so we treat all active Tier 1 items
+  // as committed in full for the current period. If product approves per-item due
+  // dates in a future schema revision, this logic should filter by due date.
+  // Pro-ration is intentionally avoided — partial commitment is misleading.
   const tier1Items = stackItems.filter((i) => i.tier === "1" && i.isActive);
   const committedAmount = Math.round(
     tier1Items.reduce((s, i) => s + (i.monthlyAmount || 0), 0)
@@ -126,12 +130,12 @@ export interface SimulationResult {
   remainingAfter: number;
   bufferBreached: boolean;
   shortfall: number;
-  nearestThreatenedObligation: {
+  nearestThreatenedObligation?: {
     label: string;
     monthlyAmount: number;
     daysUntilDue: number | null;
-  } | null;
-  harvestSuggestion: HarvestSuggestion | null;
+  };
+  harvestSuggestion?: HarvestSuggestion;
 }
 
 /**
@@ -161,12 +165,13 @@ export function simulateAction(
           monthlyAmount: tier1Items[0].monthlyAmount || 0,
           daysUntilDue: state.daysToNextSalary,
         }
-      : null;
+      : undefined;
 
   // Harvest suggestion:
   //  - Tier 2 item not due within 7 days (daysToNextSalary > 7)
   //  - monthlyAmount >= full shortfall (exact spec requirement — not 0.8×)
-  let harvestSuggestion: HarvestSuggestion | null = null;
+  // Field is OMITTED from the response entirely when no candidate exists.
+  let harvestSuggestion: HarvestSuggestion | undefined;
   if (!safe && shortfall > 0) {
     const daysRemaining = state.daysToNextSalary ?? 30;
     const tier2Items = stackItems.filter((i) => i.tier === "2" && i.isActive);
@@ -184,14 +189,15 @@ export function simulateAction(
     }
   }
 
-  return {
+  const result: SimulationResult = {
     safe,
     remainingAfter: Math.round(remainingAfter),
     bufferBreached,
     shortfall: Math.round(shortfall),
-    nearestThreatenedObligation,
-    harvestSuggestion,
   };
+  if (nearestThreatenedObligation) result.nearestThreatenedObligation = nearestThreatenedObligation;
+  if (harvestSuggestion) result.harvestSuggestion = harvestSuggestion;
+  return result;
 }
 
 // ─── Health Score ─────────────────────────────────────────────────────────────
@@ -204,11 +210,10 @@ export interface HealthScore {
 /**
  * Compute a 0–100 health score.
  * Weights: savings rate 40%, buffer adequacy 30%, Tier 1 obligation coverage 30%.
+ * Total max = 100. No additive bonuses outside these three components.
  *
- * Goal progress contributes within the obligations component when goals exist:
- * if all active goals are on track (savedAmount >= targetAmount * progress
- * fraction), obligation score is boosted proportionally to goals on-track ratio.
- * Goals contribute 0 to the score when the goals table has no rows.
+ * Goals: reserved for a future scoring iteration. `userGoals` is accepted so
+ * the signature is stable, but goals contribute 0 to the score in this version.
  *
  * "Past due" check: if committedAmount > currentBalance the user cannot fund
  * their Tier 1 obligations — obligation score is 0.
@@ -255,31 +260,10 @@ export function computeHealthScore(
     obligationScore = Math.round(coverage * 30);
   }
 
-  // Goal progress adjustment: when goals exist, compute on-track ratio and
-  // apply it to partially recover the obligation score (up to 10 pts bonus,
-  // capped so total never exceeds 100). Goals contribute 0 when no rows.
-  // Status enum: "on_track" | "at_risk" | "paused"
-  let goalBonus = 0;
-  if (userGoals.length > 0 && !anyPastDue) {
-    const activeGoals = userGoals.filter((g) => g.status !== "paused");
-    if (activeGoals.length > 0) {
-      const onTrack = activeGoals.filter((g) => {
-        if (!g.targetAmount || g.targetAmount === 0) return false;
-        const createdMs = g.createdAt ? new Date(g.createdAt).getTime() : Date.now();
-        const deadlineMs = g.deadline ? new Date(g.deadline).getTime() : 0;
-        const progressFraction =
-          deadlineMs > createdMs
-            ? Math.min(1, (Date.now() - createdMs) / (deadlineMs - createdMs))
-            : 0.5;
-        const expectedSaved = g.targetAmount * progressFraction;
-        return (g.currentAmount || 0) >= expectedSaved;
-      });
-      const onTrackRatio = onTrack.length / activeGoals.length;
-      goalBonus = Math.round(onTrackRatio * 10);
-    }
-  }
+  // Goals: accepted for future use, not scored in this version.
+  void userGoals;
 
-  const rawScore = savingsScore + bufferScore + obligationScore + goalBonus;
+  const rawScore = savingsScore + bufferScore + obligationScore;
   const score = Math.max(0, Math.min(100, rawScore));
 
   // Explanation
