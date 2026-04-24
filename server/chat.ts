@@ -89,10 +89,17 @@ function guessCategoryFromHint(hint: string, msg: string): string {
   return "entertainment";
 }
 
+// Extract the first numeric amount from a string (supports "3k", "3,000", "3000")
+function extractFirstAmount(text: string): number {
+  const m = text.match(/\b(\d[\d,]*(?:\.\d+)?k?)\b/i);
+  if (!m) return 0;
+  return parseKshAmount(m[1]);
+}
+
 function classifyIntent(message: string): ParsedIntent {
   const msg = message.toLowerCase();
 
-  // Transfer: "send mum 2000" / "pay john 5k" / "transfer 3000 to sister"
+  // ── Transfer: "send mum 2000" / "pay john 5k" / "transfer 3000 to sister" ──
   const transferPatterns = [
     /(?:send|pay|transfer)\s+([a-z][a-z\s]+?)\s+(?:ksh\s*)?(\d[\d,.]+k?)\b/i,
     /(?:send|pay|transfer)\s+(?:ksh\s*)?(\d[\d,.]+k?)\s+(?:to\s+)?([a-z][a-z\s]+)/i,
@@ -113,15 +120,40 @@ function classifyIntent(message: string): ParsedIntent {
     }
   }
 
-  // Simulate spend: "can I buy/spend/afford X" or explicit amount + context
-  const simPatterns = [
-    /(?:buy|spend|afford|do|get|have)\s+(?:ksh\s*)?(\d[\d,.]+k?)(?:\s+on\s+([a-z\s]+))?/i,
+  // ── Salary / income (check before simulate so "got 85k" doesn't confuse) ──
+  const salaryPhrases = /salary|payslip|just (got|received|been paid)|got paid|income arrived|salary.*(arrived|landed|in|came)/i;
+  const receivedPattern = /(?:received|got|deposited|salary\s+of)\s+(?:ksh\s*)?(\d[\d,.]+k?)/i;
+  if (salaryPhrases.test(msg) || receivedPattern.test(msg)) {
+    const m = message.match(receivedPattern);
+    const amount = m ? parseKshAmount(m[1]) : undefined;
+    return { kind: "salary_income", amount };
+  }
+
+  // ── Health check ──────────────────────────────────────────────────────────
+  if (
+    /how\s+(am|are)\s+(i|we)\s+doing|financial.*(health|situation|status)|how.*(looking|going)/i.test(msg) ||
+    /am i on track|health score|my finances/i.test(msg)
+  ) {
+    return { kind: "health_check" };
+  }
+
+  // ── Spend query (open-ended, no specific amount) ──────────────────────────
+  if (
+    /how much (can|do) i (spend|have|afford)|what.*(float|balance|available)|can i spend\??$/.test(msg) ||
+    /(?:my|the)\s+(?:float|available\s+money|free\s+money)/i.test(msg)
+  ) {
+    return { kind: "spend_query" };
+  }
+
+  // ── Simulate spend: explicit patterns ────────────────────────────────────
+  const explicitSimPatterns = [
+    /(?:buy|spend|afford|do|get|have)\s+(?:ksh\s*)?(\d[\d,.]+k?)(?:[^a-z]+([a-z\s]+))?/i,
     /(?:ksh\s*)?(\d[\d,.]+k?)\s+on\s+([a-z\s]+)/i,
     /spend\s+(?:ksh\s*)?(\d[\d,.]+k?)/i,
-    /(?:nyama choma|lunch|dinner|drinks)\s+(?:for\s+)?(?:ksh\s*)?(\d[\d,.]+k?)/i,
-    /(?:ksh\s*)?(\d[\d,.]+k?)\s+(?:nyama choma|lunch|dinner|drinks)/i,
+    /(?:nyama\s*choma|lunch|dinner|drinks|supper|brunch)\s+(?:for\s+)?(?:[a-z\s,]+)?(?:ksh\s*)?(\d[\d,.]+k?)/i,
+    /(?:ksh\s*)?(\d[\d,.]+k?)\s+(?:for\s+)?(?:nyama\s*choma|lunch|dinner|drinks)/i,
   ];
-  for (const pat of simPatterns) {
+  for (const pat of explicitSimPatterns) {
     const m = message.match(pat);
     if (m) {
       const numStr = m[1];
@@ -137,29 +169,29 @@ function classifyIntent(message: string): ParsedIntent {
     }
   }
 
-  // Salary / income — with or without explicit amount
-  const salaryPhrases = /salary|payslip|just (got|received|been paid)|got paid|income arrived|salary.*(arrived|landed|in|came)/i;
-  const receivedPattern = /(?:received|got|deposited|salary\s+of)\s+(?:ksh\s*)?(\d[\d,.]+k?)/i;
-  if (salaryPhrases.test(msg) || receivedPattern.test(msg)) {
-    const m = message.match(receivedPattern);
-    const amount = m ? parseKshAmount(m[1]) : undefined;
-    return { kind: "salary_income", amount };
+  // ── Broad leisure/entertainment context + any amount in message ───────────
+  // Catches natural phrases like "Can I go out for nyama choma, maybe 3k?"
+  const entertainmentContext =
+    /nyama.choma|going out|go out|night out|drinks|bar|movie|cinema|fun|eat out|restaurant|entertain|leisure|treat|spoil|splurge|party|outing|snacks?/i;
+  if (entertainmentContext.test(msg)) {
+    const amount = extractFirstAmount(msg);
+    if (amount > 0) {
+      return { kind: "simulate_spend", amount, category: "entertainment" };
+    }
   }
 
-  // Health check
-  if (
-    /how\s+(am|are)\s+(i|we)\s+doing|financial.*(health|situation|status)|how.*(looking|going)/i.test(msg) ||
-    /am i on track|health score|my finances/i.test(msg)
-  ) {
-    return { kind: "health_check" };
-  }
-
-  // Spend query (open-ended — no specific amount)
-  if (
-    /how much (can|do) i (spend|have|afford)|what.*(float|balance|available)|can i spend/i.test(msg) ||
-    /(?:my|the)\s+(?:float|available\s+money|free\s+money)/i.test(msg)
-  ) {
-    return { kind: "spend_query" };
+  // ── Broad spend-decision context + any amount (last resort before unknown) ─
+  // Catches: "can I afford 3k?", "is 5000 ok?", "will 2k be enough?"
+  const decisionWords = /can i|should i|is it ok|afford|will i|would it|enough for|is \d/i;
+  if (decisionWords.test(msg)) {
+    const amount = extractFirstAmount(msg);
+    if (amount > 0) {
+      return {
+        kind: "simulate_spend",
+        amount,
+        category: guessCategoryFromHint("", msg),
+      };
+    }
   }
 
   return { kind: "unknown" };
@@ -275,14 +307,22 @@ function composeFactsForIntent(
         const remaining = fmt(simulation.remainingAfter);
         return `${displayName}, ${amtStr} is safe — it leaves ${remaining} in your float after this spend.`;
       }
-      // Unsafe — Red Alert (deterministic)
+      // Unsafe — Red Alert (deterministic, all required fields always present)
       const lines: string[] = [
         `${displayName}, ${amtStr} is ${fmt(simulation.shortfall)} more than your float allows right now.`,
       ];
+      // Obligation at risk — always include this, with fallback when no Tier 1 item identified
       if (simulation.nearestThreatenedObligation) {
         const { label, daysUntilDue } = simulation.nearestThreatenedObligation;
         const daysStr = daysUntilDue !== null ? `${daysUntilDue} days` : "this month";
         lines.push(`This would put your ${label} at risk — that obligation is due in ${daysStr}.`);
+      } else {
+        // Fallback: reference safe buffer and days to next salary
+        const days = state.daysToNextSalary;
+        const daysStr = days !== null ? `${days} days` : "this month";
+        lines.push(
+          `This would take your balance below your safe buffer — the ${fmt(state.safeBuffer)} reserve that protects your essential obligations. Your next salary is in ${daysStr}.`
+        );
       }
       if (simulation.harvestSuggestion) {
         const { sourceName, deferableAmount } = simulation.harvestSuggestion;
@@ -604,6 +644,27 @@ export async function streamChat(req: ChatRequest, res: Response): Promise<void>
     ? `User said: "${message}"\n\nFacts already presented to the user (DO NOT repeat or modify these KSh figures — just add warm 1-2 sentence RAFIKI framing):\n${factString}`
     : message;
 
+  // ── Build KSh amount whitelist for numeric guardrail ─────────────────────
+  // When factString is pre-composed, collect all KSh amounts from it so we
+  // can strip any model-invented figures from Gemini's framing text.
+  const allowedKshAmounts: Set<string> = new Set();
+  if (factString) {
+    const kshPattern = /KSh\s+([\d,]+)/g;
+    let kshMatch: RegExpExecArray | null;
+    while ((kshMatch = kshPattern.exec(factString)) !== null) {
+      allowedKshAmounts.add(kshMatch[1].replace(/,/g, ""));
+    }
+  }
+
+  /** Strip KSh figures from text that aren't in the allowed set. */
+  function guardNumbers(text: string): string {
+    if (allowedKshAmounts.size === 0) return text; // No fact-based amounts to check
+    return text.replace(/KSh\s+([\d,]+)/gi, (match, digits) => {
+      const normalized = digits.replace(/,/g, "");
+      return allowedKshAmounts.has(normalized) ? match : "[figure]";
+    });
+  }
+
   // ── Stream server-composed facts first (hard gate) ────────────────────────
   const allToolLog: ToolCallRecord[] = [...preCtx.toolLog];
   let fullAssistantText = "";
@@ -624,6 +685,10 @@ export async function streamChat(req: ChatRequest, res: Response): Promise<void>
   }
 
   // ── Gemini streaming: adds conversational framing + handles unknown intents ─
+  // For known intents (factString non-empty): collect Gemini's text, apply
+  // numeric guardrail, then stream the cleaned result. This is the final
+  // hard gate ensuring model-invented KSh numbers never reach the user.
+  // For unknown intents: stream normally token by token.
   try {
     let lastTransientErr: Error | null = null;
     let succeeded = false;
@@ -636,7 +701,7 @@ export async function streamChat(req: ChatRequest, res: Response): Promise<void>
           systemInstruction: systemPrompt,
           generationConfig: {
             temperature: 0.7,
-            maxOutputTokens: factString ? 200 : 1024, // Short framing only when facts are pre-composed
+            maxOutputTokens: factString ? 200 : 1024,
           },
         });
 
@@ -647,24 +712,39 @@ export async function streamChat(req: ChatRequest, res: Response): Promise<void>
         for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
           const stream = await chat.sendMessageStream(currentParts);
           const roundFunctionCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
+          // Buffer for this round's text (used for guardrail check on known intents)
+          let roundText = "";
 
           for await (const chunk of stream.stream) {
             const parts = chunk.candidates?.[0]?.content?.parts ?? [];
             for (const part of parts) {
               if ("text" in part && part.text) {
-                // When facts are pre-composed, append a space separator before Gemini framing
-                if (fullAssistantText.length > 0 && !fullAssistantText.endsWith(" ") && round === 0) {
-                  sseWrite(res, { type: "token", text: " " });
-                  fullAssistantText += " ";
+                if (factString) {
+                  // Collect text; guardrail + stream applied after full round
+                  roundText += part.text;
+                } else {
+                  // Unknown intent — stream directly
+                  fullAssistantText += part.text;
+                  sseWrite(res, { type: "token", text: part.text });
                 }
-                fullAssistantText += part.text;
-                sseWrite(res, { type: "token", text: part.text });
               } else if ("functionCall" in part && part.functionCall) {
                 roundFunctionCalls.push({
                   name: part.functionCall.name,
                   args: (part.functionCall.args ?? {}) as Record<string, unknown>,
                 });
               }
+            }
+          }
+
+          // Apply guardrail and stream collected framing text (known intents)
+          if (factString && roundText.trim()) {
+            const cleaned = guardNumbers(roundText).trim();
+            if (cleaned) {
+              const spacer =
+                fullAssistantText.length > 0 && !fullAssistantText.endsWith(" ") ? " " : "";
+              const toStream = spacer + cleaned;
+              fullAssistantText += toStream;
+              sseWrite(res, { type: "token", text: toStream });
             }
           }
 
